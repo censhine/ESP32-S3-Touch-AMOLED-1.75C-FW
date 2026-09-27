@@ -1,0 +1,9 @@
+build*/
+vendor/
+.cache/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+artifacts/
+__pycache__/
+.DS_Store

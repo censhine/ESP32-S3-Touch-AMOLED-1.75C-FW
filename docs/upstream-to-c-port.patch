@@ -1,0 +1,1837 @@
+diff --git a/ports/waveshare-1.75/firmware/brookesia/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/CMakeLists.txt
+index 15beb5b..ad5d555 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/CMakeLists.txt
+@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.16)
+ # example.  The firmware keeps only its product-specific applications here so
+ # the large framework sources are not duplicated in the repository.
+ set(EXTRA_COMPONENT_DIRS
++    "${CMAKE_CURRENT_LIST_DIR}/../../../../components/round_wing"
+     "${CMAKE_CURRENT_LIST_DIR}/../../examples/esp-idf/03_esp-brookesia/components/brookesia_core"
+     "${CMAKE_CURRENT_LIST_DIR}/../../examples/esp-idf/03_esp-brookesia/components/brookesia_app_squareline_demo"
+ )
+@@ -19,7 +20,7 @@ add_compile_options(
+ )
+ 
+ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+-project(esp32-s3-touch-amoled-brookesia)
++project(round-wing-1_75c-brookesia VERSION 0.1.0)
+ 
+ # mcp-c-sdk 2.0.1 contains bounded strncpy calls that GCC 14 cannot prove are
+ # terminated.  Keep the compatibility exception local to that managed target;
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.cpp b/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.cpp
+index 4556349..1b82bf5 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.cpp
+@@ -165,7 +165,6 @@ bool ButtonTest::run()
+     _boot_level.store(-1);
+     _pwr_passed.store(false);
+     _boot_passed.store(false);
+-    _expander = nullptr;
+     _pwr_configured = false;
+     _boot_configured = false;
+     updateUi();
+@@ -241,20 +240,16 @@ bool ButtonTest::configureBootInput()
+ 
+ bool ButtonTest::configurePwrInput()
+ {
+-    const esp_err_t init_result = bsp_io_expander_try_init(&_expander);
+-    if (init_result != ESP_OK) {
+-        ESP_UTILS_LOGE(
+-            "Initialize TCA9554 for PWR EXIO4 failed: %s",
+-            esp_err_to_name(init_result)
+-        );
+-        return false;
+-    }
+-
+-    const esp_err_t result = esp_io_expander_set_dir(
+-        _expander, PWR_EXIO_MASK, IO_EXPANDER_INPUT
+-    );
++    const gpio_config_t config = {
++        .pin_bit_mask = 1ULL << PWR_GPIO,
++        .mode = GPIO_MODE_INPUT,
++        .pull_up_en = GPIO_PULLUP_DISABLE,
++        .pull_down_en = GPIO_PULLDOWN_DISABLE,
++        .intr_type = GPIO_INTR_DISABLE,
++    };
++    const esp_err_t result = gpio_config(&config);
+     if (result != ESP_OK) {
+-        ESP_UTILS_LOGE("Configure PWR EXIO4 input failed: %s", esp_err_to_name(result));
++        ESP_UTILS_LOGE("Configure PWR GPIO3 input failed: %s", esp_err_to_name(result));
+         return false;
+     }
+     return true;
+@@ -285,7 +280,7 @@ bool ButtonTest::createUi()
+     lv_obj_set_style_text_font(_subtitle_label, &lv_font_montserrat_16, LV_PART_MAIN);
+     lv_obj_set_style_text_color(_subtitle_label, lv_color_hex(COLOR_MUTED), LV_PART_MAIN);
+ 
+-    _pwr_widgets = createButtonCard(_screen, "PWR", "TCA9554 / EXIO4");
++    _pwr_widgets = createButtonCard(_screen, "PWR", "ESP32-S3 / GPIO3");
+     _boot_widgets = createButtonCard(_screen, "BOOT", "ESP32-S3 / GPIO0");
+ 
+     _result_label = lv_label_create(_screen);
+@@ -484,19 +479,7 @@ void ButtonTest::workerLoop()
+             next_retry = now + pdMS_TO_TICKS(INPUT_RETRY_PERIOD_MS);
+         }
+ 
+-        int pwr_level = -1;
+-        if (_pwr_configured && _expander != nullptr) {
+-            uint32_t levels = 0;
+-            const esp_err_t result = esp_io_expander_get_level(
+-                _expander, PWR_EXIO_MASK, &levels
+-            );
+-            if (result == ESP_OK) {
+-                pwr_level = (levels & PWR_EXIO_MASK) != 0 ? 1 : 0;
+-            } else if (previous_pwr_level != -1) {
+-                ESP_UTILS_LOGE("Read PWR EXIO4 failed: %s", esp_err_to_name(result));
+-            }
+-        }
+-
++        const int pwr_level = _pwr_configured ? gpio_get_level(PWR_GPIO) : -1;
+         const int boot_level = _boot_configured ? gpio_get_level(BOOT_GPIO) : -1;
+         _pwr_level.store(pwr_level);
+         _boot_level.store(boot_level);
+@@ -511,7 +494,7 @@ void ButtonTest::workerLoop()
+         }
+ 
+         if (pwr_level != previous_pwr_level) {
+-            ESP_UTILS_LOGI("PWR EXIO4 level changed: %d", pwr_level);
++            ESP_UTILS_LOGI("PWR GPIO3 level changed: %d", pwr_level);
+             previous_pwr_level = pwr_level;
+         }
+         if (boot_level != previous_boot_level) {
+@@ -552,7 +535,6 @@ void ButtonTest::stopWorker()
+     }
+ 
+     xTaskNotifyGive(task);
+-    // A first-time TCA9554 reset can contain two 1000 ms I2C transactions.
+     for (int i = 0; i < 250 && _worker_task.load() != nullptr; ++i) {
+         vTaskDelay(pdMS_TO_TICKS(10));
+     }
+@@ -560,7 +542,7 @@ void ButtonTest::stopWorker()
+     if (_worker_task.load() != nullptr) {
+         // The worker never touches LVGL and owns its self-delete path. Leaving
+         // it to finish avoids racing vTaskDelete() against natural task exit.
+-        ESP_UTILS_LOGW("Button Test worker is still leaving a bounded I2C call");
++        ESP_UTILS_LOGW("Button Test worker did not exit within the wait period");
+     }
+ }
+ 
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.hpp b/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.hpp
+index a9188b5..ff3845c 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.hpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/ButtonTest/ButtonTest.hpp
+@@ -9,7 +9,7 @@
+ #include <cstdint>
+ 
+ #include "driver/gpio.h"
+-#include "esp_io_expander.h"
++#include "bsp/esp-bsp.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+ #include "lvgl.h"
+@@ -70,7 +70,6 @@ private:
+     void workerLoop();
+     void stopWorker();
+ 
+-    esp_io_expander_handle_t _expander = nullptr;
+     bool _pwr_configured = false;
+     bool _boot_configured = false;
+ 
+@@ -94,8 +93,8 @@ private:
+     lv_obj_t *_warning_label = nullptr;
+     lv_timer_t *_ui_timer = nullptr;
+ 
+-    static constexpr gpio_num_t BOOT_GPIO = GPIO_NUM_0;
+-    static constexpr uint32_t PWR_EXIO_MASK = IO_EXPANDER_PIN_NUM_4;
++    static constexpr gpio_num_t BOOT_GPIO = BSP_BUTTON_BOOT_GPIO;
++    static constexpr gpio_num_t PWR_GPIO = BSP_BUTTON_PWR_GPIO;
+     static constexpr int SAMPLE_PERIOD_MS = 50;
+     static constexpr int UI_PERIOD_MS = 100;
+     static constexpr int INPUT_RETRY_PERIOD_MS = 1000;
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.cpp b/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.cpp
+index 3405914..e3471da 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.cpp
+@@ -32,8 +32,8 @@ LV_IMG_DECLARE(img_app_gallery);
+ namespace {
+ 
+ constexpr char APP_NAME[] = "Gallery";
+-constexpr char PHOTO_DIRECTORY[] = STORAGE_SERVICE_MOUNT_POINT "/photos";
+-constexpr char PHOTO_DIRECTORY_COMPAT[] = STORAGE_SERVICE_MOUNT_POINT "/Photos";
++constexpr char PHOTO_DIRECTORY[] = STORAGE_SERVICE_MOUNT_POINT "/pictures";
++constexpr char PHOTO_DIRECTORY_COMPAT[] = STORAGE_SERVICE_MOUNT_POINT "/photos";
+ constexpr size_t INTERNAL_FALLBACK_LIMIT = 512 * 1024;
+ constexpr size_t JPEG_HEADER_SCAN_LIMIT = 512 * 1024;
+ 
+@@ -213,8 +213,8 @@ bool Gallery::run()
+     _caption_shown_tick = _last_slide_tick;
+ 
+     createUi();
+-    setSessionState(SessionState::Mounting, "Mounting SD card...");
+-    showStatus("Mounting SD card...", true, true);
++    setSessionState(SessionState::Mounting, "Opening internal media...");
++    showStatus("Opening internal media...", true, true);
+ 
+     if (!startWorker()) {
+         setSessionState(
+@@ -223,7 +223,7 @@ bool Gallery::run()
+         );
+     }
+ 
+-    // Keep the app open when the card or worker is unavailable so the user gets
++    // Keep the app open when the volume or worker is unavailable so the user gets
+     // an actionable on-screen error instead of being bounced back to launcher.
+     return true;
+ }
+@@ -316,7 +316,7 @@ bool Gallery::stopWorker(TickType_t timeout)
+ 
+     const TickType_t started = xTaskGetTickCount();
+     // Never force-delete while FatFs or the JPEG library owns private state.
+-    // A timed-out close retains the list, pending frame, and SD lease so a
++    // A timed-out close retains the list, pending frame, and media lease so a
+     // later close can safely finish cleanup.
+     while (!_worker_stopped.load(std::memory_order_acquire)) {
+         if (_worker_signal != nullptr) {
+@@ -344,10 +344,10 @@ void Gallery::workerLoop()
+         std::snprintf(
+             message,
+             sizeof(message),
+-            "No SD card available\nInsert a card and reopen Gallery\n%s",
++            "Media unavailable\nMount / retry in Settings > Storage\n%s",
+             esp_err_to_name(acquire_result)
+         );
+-        setSessionState(SessionState::NoCard, message);
++        setSessionState(SessionState::Unavailable, message);
+         goto worker_exit;
+     }
+ 
+@@ -372,26 +372,24 @@ void Gallery::workerLoop()
+         goto worker_exit;
+     }
+ 
+-    setSessionState(SessionState::Scanning, "Scanning /sdcard/photos...");
++    setSessionState(SessionState::Scanning, "Scanning /media/pictures...");
+     {
+         bool directory_found = false;
+         bool lower_directory_found = false;
+         if (!scanPhotoDirectory(PHOTO_DIRECTORY, lower_directory_found)) {
+-            setSessionState(SessionState::Error, "SD card read error while scanning photos");
++            setSessionState(SessionState::Error, "Media read error while scanning photos");
+             goto worker_exit;
+         }
+         directory_found = lower_directory_found;
+ 
+-        // FAT normally treats these names as identical. Only try the capitalized
+-        // compatibility path when the canonical lowercase directory is absent,
+-        // which also prevents duplicate entries on case-insensitive volumes.
+-        if (!lower_directory_found) {
++        // Keep older photo packages usable when the canonical library is empty.
++        if (_photo_count == 0) {
+             bool compatibility_directory_found = false;
+             if (!scanPhotoDirectory(PHOTO_DIRECTORY_COMPAT, compatibility_directory_found)) {
+-                setSessionState(SessionState::Error, "SD card read error while scanning Photos");
++                setSessionState(SessionState::Error, "Media read error while scanning Photos");
+                 goto worker_exit;
+             }
+-            directory_found = compatibility_directory_found;
++            directory_found = directory_found || compatibility_directory_found;
+         }
+ 
+         if (_stop_requested.load(std::memory_order_acquire)) {
+@@ -402,7 +400,7 @@ void Gallery::workerLoop()
+             if (!directory_found) {
+                 setSessionState(
+                     SessionState::Empty,
+-                    "Photo folder not found\nCreate /sdcard/photos and add\nbaseline JPG/JPEG files"
++                    "Photo folder not found\nCreate /media/pictures and add\nbaseline JPG/JPEG files"
+                 );
+             } else if (_skipped_count != 0) {
+                 setSessionState(
+@@ -412,7 +410,7 @@ void Gallery::workerLoop()
+             } else {
+                 setSessionState(
+                     SessionState::Empty,
+-                    "No photos found\nCopy baseline JPG/JPEG files to\n/sdcard/photos"
++                    "No photos found\nCopy baseline JPG/JPEG files to\n/media/pictures"
+                 );
+             }
+             goto worker_exit;
+@@ -780,7 +778,7 @@ Gallery::DecodedFrame *Gallery::decodePhoto(uint8_t index, uint32_t request_toke
+     }
+     if (bytes_read != photo.file_size) {
+         heap_caps_free(input);
+-        std::snprintf(frame->message, sizeof(frame->message), "Photo read failed or card was removed");
++        std::snprintf(frame->message, sizeof(frame->message), "Photo read failed; retry storage in Settings");
+         return frame;
+     }
+ 
+@@ -917,7 +915,7 @@ void Gallery::createUi()
+ 
+     // The 2.06-inch reference app is intentionally a photograph-first
+     // viewer: one image owns the whole screen and a tap advances it.  Keep
+-    // that interaction, but leave the SD/JPEG work off the LVGL thread.
++    // that interaction, but leave the media/JPEG work off the LVGL thread.
+     lv_obj_add_flag(_root, LV_OBJ_FLAG_CLICKABLE);
+     lv_obj_remove_flag(_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
+     lv_obj_add_event_cb(_root, viewerEventCallback, LV_EVENT_CLICKED, this);
+@@ -1039,7 +1037,7 @@ void Gallery::processUi()
+                 requestPhoto(0, false);
+             }
+             break;
+-        case SessionState::NoCard:
++        case SessionState::Unavailable:
+         case SessionState::Empty:
+         case SessionState::Error:
+             setControlsEnabled(false);
+@@ -1052,7 +1050,7 @@ void Gallery::processUi()
+     }
+ 
+     const bool terminal_state =
+-        state == SessionState::NoCard || state == SessionState::Empty ||
++        state == SessionState::Unavailable || state == SessionState::Empty ||
+         state == SessionState::Error;
+     if (terminal_state &&
+             _worker_stopped.load(std::memory_order_acquire) &&
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.hpp b/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.hpp
+index 7faf30d..ca5f543 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.hpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Gallery/Gallery.hpp
+@@ -60,7 +60,7 @@ private:
+         Mounting,
+         Scanning,
+         Ready,
+-        NoCard,
++        Unavailable,
+         Empty,
+         Error,
+     };
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/MusicPlayer/MusicPlayer.cpp b/ports/waveshare-1.75/firmware/brookesia/components/MusicPlayer/MusicPlayer.cpp
+index 3a67f6d..33eb19a 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/MusicPlayer/MusicPlayer.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/MusicPlayer/MusicPlayer.cpp
+@@ -25,8 +25,8 @@
+ namespace {
+ 
+ const char *TAG = "MusicPlayer";
+-constexpr char SD_MUSIC_DIR[] = STORAGE_SERVICE_MOUNT_POINT "/music";
+-constexpr char SD_MUSIC_DIR_COMPAT[] = STORAGE_SERVICE_MOUNT_POINT "/Music";
++constexpr char MEDIA_MUSIC_DIR[] = STORAGE_SERVICE_MOUNT_POINT "/music";
++constexpr char MEDIA_MUSIC_DIR_COMPAT[] = STORAGE_SERVICE_MOUNT_POINT "/Music";
+ constexpr char SPIFFS_MUSIC_DIR[] = BSP_SPIFFS_MOUNT_POINT "/music";
+ 
+ size_t scan_music_directory(const char *path, const char *source,
+@@ -228,26 +228,25 @@ bool MusicPlayer::run(void)
+ 
+     /* Hold the lease for the complete lifetime of the iterator and the audio
+      * player's FILE handle. A lease prevents Settings from logically
+-     * unmounting the card while playback is active. Physical removal can still
+-     * happen on this board (there is no card-detect GPIO), so every open/play
++     * unmounting internal media while playback is active. Every open/play
+      * failure remains a recoverable UI error. */
+     esp_err_t result = storage_service_acquire(&_storage_lease);
+     if (result == ESP_OK) {
+-        track_count = scan_music_directory(SD_MUSIC_DIR, "SD", &_file_iterator);
+-        music_path = (track_count > 0) ? SD_MUSIC_DIR : nullptr;
++        track_count = scan_music_directory(MEDIA_MUSIC_DIR, "Internal media", &_file_iterator);
++        music_path = (track_count > 0) ? MEDIA_MUSIC_DIR : nullptr;
+ 
+         if (track_count == 0) {
+-            track_count = scan_music_directory(SD_MUSIC_DIR_COMPAT, "SD compatibility", &_file_iterator);
+-            music_path = (track_count > 0) ? SD_MUSIC_DIR_COMPAT : nullptr;
++            track_count = scan_music_directory(MEDIA_MUSIC_DIR_COMPAT, "Internal media compatibility", &_file_iterator);
++            music_path = (track_count > 0) ? MEDIA_MUSIC_DIR_COMPAT : nullptr;
+         }
+ 
+         if (track_count == 0) {
+-            /* No SD-backed object survived the scans, so release before
++            /* No media-backed object survived the scans, so release before
+              * falling back to the always-mounted firmware filesystem. */
+             storage_service_release(&_storage_lease);
+         }
+     } else {
+-        ESP_LOGW(TAG, "SD music unavailable, falling back to SPIFFS: %s",
++        ESP_LOGW(TAG, "Internal music unavailable, falling back to SPIFFS: %s",
+                  esp_err_to_name(result));
+         storage_service_release(&_storage_lease);
+     }
+@@ -258,7 +257,7 @@ bool MusicPlayer::run(void)
+     }
+ 
+     if (track_count == 0) {
+-        ESP_LOGW(TAG, "No MP3/WAV tracks found on SD or SPIFFS");
++        ESP_LOGW(TAG, "No MP3/WAV tracks found on internal media or SPIFFS");
+         /* Keep the complete reference player visible even with an empty
+          * firmware image. Passing NULL makes the already-guarded demo render
+          * its cover/control/spectrum framework with playback disabled. */
+@@ -330,7 +329,7 @@ bool MusicPlayer::close(void)
+         bsp_extra_file_instance_deinit(&_file_iterator);
+         storage_service_release(&_storage_lease);
+     } else {
+-        ESP_LOGE(TAG, "Retaining music iterator and SD lease because audio cleanup is incomplete");
++        ESP_LOGE(TAG, "Retaining music iterator and media lease because audio cleanup is incomplete");
+     }
+     return audio_stopped;
+ }
+@@ -356,7 +355,7 @@ bool MusicPlayer::pause(void)
+         }
+         lv_demo_music_exit_pause();
+     }
+-    /* Preserve the UI, iterator, and SD lease, but fully hand off the shared
++    /* Preserve the UI, iterator, and media lease, but fully hand off the shared
+      * codec so Video/Recorder/SpecAnalyzer/Xiaozhi may acquire it. */
+     return stopAudioSession(true);
+ }
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Recorder/Recorder.cpp b/ports/waveshare-1.75/firmware/brookesia/components/Recorder/Recorder.cpp
+index 466bbf9..631d4da 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Recorder/Recorder.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Recorder/Recorder.cpp
+@@ -91,8 +91,7 @@ const char *base_name(const char *path)
+ esp_err_t create_recording_directory()
+ {
+     const char *paths[] = {
+-        STORAGE_SERVICE_MOUNT_POINT "/Waveshare",
+-        STORAGE_SERVICE_MOUNT_POINT "/Waveshare/Recordings",
++        STORAGE_SERVICE_MOUNT_POINT "/recordings",
+     };
+     for (const char *path : paths) {
+         if (mkdir(path, 0775) != 0 && errno != EEXIST) {
+@@ -114,7 +113,7 @@ void create_recording_path(char *path, size_t path_size)
+             path,
+             path_size,
+             STORAGE_SERVICE_MOUNT_POINT
+-            "/Waveshare/Recordings/REC-%04d%02d%02d-%02d%02d%02d-%03u.wav",
++            "/recordings/REC-%04d%02d%02d-%02d%02d%02d-%03u.wav",
+             local.tm_year + 1900,
+             local.tm_mon + 1,
+             local.tm_mday,
+@@ -127,7 +126,7 @@ void create_recording_path(char *path, size_t path_size)
+         snprintf(
+             path,
+             path_size,
+-            STORAGE_SERVICE_MOUNT_POINT "/Waveshare/Recordings/REC-boot-%lld.wav",
++            STORAGE_SERVICE_MOUNT_POINT "/recordings/REC-boot-%lld.wav",
+             static_cast<long long>(esp_timer_get_time() / 1000)
+         );
+     }
+@@ -213,7 +212,7 @@ bool Recorder::run()
+     lv_obj_center(_record_button_label);
+ 
+     _status_label = lv_label_create(screen);
+-    lv_label_set_text(_status_label, "Tap to record to SD card");
++    lv_label_set_text(_status_label, "Tap to record to internal media");
+     lv_obj_set_width(_status_label, 330);
+     lv_obj_set_style_text_align(_status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+     lv_obj_set_style_text_color(_status_label, lv_color_hex(0xB7BAC5), LV_PART_MAIN);
+@@ -293,7 +292,7 @@ bool Recorder::startRecording()
+     TaskHandle_t task = nullptr;
+     BaseType_t result = xTaskCreatePinnedToCore(
+         recordTask,
+-        "sd_recorder",
++        "media_recorder",
+         8 * 1024,
+         this,
+         5,
+@@ -431,9 +430,9 @@ void Recorder::updateUi()
+         }
+     }
+     if (_status_label) {
+-        const char *status = "Tap to record to SD card";
++        const char *status = "Tap to record to internal media";
+         switch (state) {
+-        case State::Starting: status = "Preparing SD and microphones..."; break;
++        case State::Starting: status = "Preparing media and microphones..."; break;
+         case State::Recording: status = "Recording MIC1 + MIC2"; break;
+         case State::Stopping: status = "Saving WAV..."; break;
+         case State::Saved: status = "Recording saved"; break;
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Settings/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/components/Settings/CMakeLists.txt
+index 638f765..9d275e3 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Settings/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Settings/CMakeLists.txt
+@@ -8,7 +8,7 @@ idf_component_register(
+     INCLUDE_DIRS ${PROJ_SRC}
+     REQUIRES brookesia_core esp32_s3_touch_amoled_1_75 driver esp_wifi lwip bsp_extra
+              system_status storage_service chat_history esp_system esp_hw_support heap esp_timer
+-    PRIV_REQUIRES espressif__esp_lvgl_adapter
++    PRIV_REQUIRES espressif__esp_lvgl_adapter esp_app_format
+ )
+ 
+ set_source_files_properties(
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Settings/Settings.cpp b/ports/waveshare-1.75/firmware/brookesia/components/Settings/Settings.cpp
+index 1fe4ccc..4435828 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Settings/Settings.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Settings/Settings.cpp
+@@ -112,7 +112,7 @@ namespace esp_brookesia::apps
+ 
+         settings_ui::add_section(list1, "System", style_list_text);
+         add_button_with_arrow(&battery, "Power");
+-        add_button_with_arrow(LV_SYMBOL_SD_CARD, "Storage");
++        add_button_with_arrow(LV_SYMBOL_DRIVE, "Storage");
+ 
+         settings_ui::add_section(list1, "More", style_list_text);
+         add_button_with_arrow(&info, "About");
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/AboutPage.cpp b/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/AboutPage.cpp
+index dd0acc3..1a8217a 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/AboutPage.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/AboutPage.cpp
+@@ -1,6 +1,7 @@
+ #include "AboutPage.hpp"
+ #include "SettingsUI.hpp"
+ #include "esp_log.h"
++#include "esp_app_desc.h"
+ #include "../Settings.hpp"
+ 
+ #define ESP_UTILS_LOG_TAG "BS:AboutPage"
+@@ -52,9 +53,11 @@ namespace esp_brookesia::apps
+         settings_ui::add_section(list1, "Device", style_list_text);
+         settings_ui::add_info_row(list1, &logo, "Manufacturer", "Waveshare", style_list_btn);
+         settings_ui::add_info_row(
+-            list1, nullptr, "Product", "ESP32-S3-Touch-AMOLED-1.75", style_list_btn);
++            list1, nullptr, "Product", "ESP32-S3-Touch-AMOLED-1.75C", style_list_btn);
+ 
+         settings_ui::add_section(list1, "Software", style_list_text);
++        const esp_app_desc_t *firmware = esp_app_get_description();
++        settings_ui::add_info_row(list1, nullptr, "Firmware", firmware->version, style_list_btn);
+         settings_ui::add_info_row(list1, nullptr, "UI Framework", "ESP-Brookesia", style_list_btn);
+         return true;
+     }
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/StoragePage.cpp b/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/StoragePage.cpp
+index dcecf7a..04face8 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/StoragePage.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/Settings/ui/StoragePage.cpp
+@@ -35,9 +35,9 @@ namespace esp_brookesia::apps {
+ namespace {
+ 
+ constexpr size_t BENCHMARK_BYTES = 4U * 1024U * 1024U;
+-constexpr char DIAGNOSTICS_DIRECTORY[] = STORAGE_SERVICE_MOUNT_POINT "/Waveshare/Diagnostics";
++constexpr char DIAGNOSTICS_DIRECTORY[] = STORAGE_SERVICE_MOUNT_POINT "/diagnostics";
+ constexpr char DIAGNOSTICS_PATH[] =
+-    STORAGE_SERVICE_MOUNT_POINT "/Waveshare/Diagnostics/device-diagnostics.txt";
++    STORAGE_SERVICE_MOUNT_POINT "/diagnostics/device-diagnostics.txt";
+ 
+ lv_obj_t *getValueLabel(lv_obj_t *row)
+ {
+@@ -90,10 +90,7 @@ esp_err_t exportDiagnostics(char *path, size_t path_size)
+         return result;
+     }
+ 
+-    result = ensureDirectory(STORAGE_SERVICE_MOUNT_POINT "/Waveshare");
+-    if (result == ESP_OK) {
+-        result = ensureDirectory(DIAGNOSTICS_DIRECTORY);
+-    }
++    result = ensureDirectory(DIAGNOSTICS_DIRECTORY);
+ 
+     storage_service_info_t storage = {};
+     if (result == ESP_OK) {
+@@ -115,7 +112,7 @@ esp_err_t exportDiagnostics(char *path, size_t path_size)
+         const bool status_valid = brookesia::system_status::get_snapshot(status);
+ 
+         bool ok = fprintf(file,
+-                          "Waveshare ESP32-S3-Touch-AMOLED-1.75 diagnostics\n"
++                          "Waveshare ESP32-S3-Touch-AMOLED-1.75C diagnostics\n"
+                           "idf_version=%s\n"
+                           "uptime_ms=%lld\n"
+                           "reset_reason=%d\n"
+@@ -124,15 +121,15 @@ esp_err_t exportDiagnostics(char *path, size_t path_size)
+                           "heap_free=%u\n"
+                           "heap_minimum=%u\n"
+                           "psram_free=%u\n"
+-                          "sd_state=%s\n"
+-                          "sd_error=%s\n"
+-                          "sd_card=%s\n"
+-                          "sd_capacity_bytes=%llu\n"
+-                          "sd_free_bytes=%llu\n"
+-                          "sd_bus_width=%lu\n"
+-                          "sd_frequency_khz=%lu\n"
+-                          "sd_generation=%lu\n"
+-                          "sd_active_leases=%lu\n",
++                          "media_state=%s\n"
++                          "media_error=%s\n"
++                          "media_volume=%s\n"
++                          "media_capacity_bytes=%llu\n"
++                          "media_free_bytes=%llu\n"
++                          "media_bus_width=%lu\n"
++                          "media_frequency_khz=%lu\n"
++                          "media_generation=%lu\n"
++                          "media_active_leases=%lu\n",
+                           esp_get_idf_version(),
+                           static_cast<long long>(esp_timer_get_time() / 1000),
+                           static_cast<int>(esp_reset_reason()),
+@@ -229,7 +226,7 @@ bool StoragePage::run()
+         setBusy(false, "Worker unavailable");
+         return false;
+     }
+-    setBusy(true, "Checking card...");
++    setBusy(true, "Checking media...");
+     if (!enqueue(WorkerCommand::Refresh)) {
+         setBusy(false, "Request queue busy");
+     }
+@@ -263,7 +260,7 @@ bool StoragePage::ensureWorker()
+             return false;
+         }
+     }
+-    if (xTaskCreate(workerTask, "settings_sd", 7 * 1024, this, 3, &worker_task) != pdPASS) {
++    if (xTaskCreate(workerTask, "settings_media", 7 * 1024, this, 3, &worker_task) != pdPASS) {
+         vQueueDelete(worker_queue);
+         worker_queue = nullptr;
+         worker_task = nullptr;
+@@ -288,7 +285,7 @@ bool StoragePage::enqueue(WorkerCommand command, bool enabled)
+ void StoragePage::createUi()
+ {
+     page_root = settings_ui::create_page(lv_screen_active());
+-    settings_ui::create_header(page_root, "Storage & SD", [](lv_event_t *event) {
++    settings_ui::create_header(page_root, "Internal storage", [](lv_event_t *event) {
+         (void)event;
+         lv_async_call([](void *parameter) {
+             (void)parameter;
+@@ -300,19 +297,19 @@ void StoragePage::createUi()
+     list = settings_ui::create_content_list(page_root);
+     lv_obj_add_style(list, &style_list, LV_PART_MAIN);
+ 
+-    settings_ui::add_section(list, "Card", style_section);
+-    status_value = getValueLabel(settings_ui::add_info_row(list, LV_SYMBOL_SD_CARD,
++    settings_ui::add_section(list, "Volume", style_section);
++    status_value = getValueLabel(settings_ui::add_info_row(list, LV_SYMBOL_DRIVE,
+                                                             "Status", "Checking...", style_row));
+-    card_value = getValueLabel(settings_ui::add_info_row(list, nullptr, "Card", "--", style_row));
++    card_value = getValueLabel(settings_ui::add_info_row(list, nullptr, "Volume", "--", style_row));
+     capacity_value = getValueLabel(
+         settings_ui::add_info_row(list, nullptr, "Capacity", "--", style_row));
+     free_value = getValueLabel(
+         settings_ui::add_info_row(list, nullptr, "Available", "--", style_row));
+     bus_value = getValueLabel(
+-        settings_ui::add_info_row(list, nullptr, "Bus", "SDMMC 1-bit", style_row));
++        settings_ui::add_info_row(list, nullptr, "Storage", "Internal flash", style_row));
+     frequency_value = getValueLabel(
+-        settings_ui::add_info_row(list, nullptr, "Clock", "--", style_row));
+-    (void)settings_ui::add_info_row(list, nullptr, "Detection", "Manual rescan", style_row);
++        settings_ui::add_info_row(list, nullptr, "Filesystem", "FAT + wear levelling", style_row));
++    (void)settings_ui::add_info_row(list, nullptr, "Path", STORAGE_SERVICE_MOUNT_POINT, style_row);
+ 
+     settings_ui::add_section(list, "Performance", style_section);
+     write_value = getValueLabel(
+@@ -339,13 +336,13 @@ void StoragePage::createUi()
+     lv_obj_add_event_cb(chat_history_switch, chatHistoryEventCallback, LV_EVENT_VALUE_CHANGED, this);
+ 
+     settings_ui::add_section(list, "Actions", style_section);
+-    refresh_button = addActionButton(list, LV_SYMBOL_REFRESH "  Rescan card", style_row,
++    refresh_button = addActionButton(list, LV_SYMBOL_REFRESH "  Mount / retry", style_row,
+                                      style_pressed, actionEventCallback, this);
+     benchmark_button = addActionButton(list, LV_SYMBOL_PLAY "  Run 4 MiB test", style_row,
+                                        style_pressed, actionEventCallback, this);
+     export_button = addActionButton(list, LV_SYMBOL_UPLOAD "  Export diagnostics", style_row,
+                                     style_pressed, actionEventCallback, this);
+-    eject_button = addActionButton(list, LV_SYMBOL_EJECT "  Safe eject", style_row,
++    eject_button = addActionButton(list, LV_SYMBOL_EJECT "  Unmount media", style_row,
+                                    style_pressed, actionEventCallback, this);
+     operation_value = getValueLabel(
+         settings_ui::add_info_row(list, nullptr, "Last operation", "Ready", style_row));
+@@ -407,7 +404,7 @@ void StoragePage::actionEventCallback(lv_event_t *event)
+ 
+     lv_obj_t *target = static_cast<lv_obj_t *>(lv_event_get_target(event));
+     WorkerCommand command = WorkerCommand::Refresh;
+-    const char *message = "Checking card...";
++    const char *message = "Checking media...";
+     if (target == page->benchmark_button) {
+         command = WorkerCommand::Benchmark;
+         message = "Testing 4 MiB...";
+@@ -416,7 +413,7 @@ void StoragePage::actionEventCallback(lv_event_t *event)
+         message = "Exporting...";
+     } else if (target == page->eject_button) {
+         command = WorkerCommand::Eject;
+-        message = "Ejecting...";
++        message = "Unmounting...";
+     }
+ 
+     page->setBusy(true, message);
+@@ -525,26 +522,24 @@ void StoragePage::applyInfo(const storage_service_info_t &info, esp_err_t info_r
+     }
+     lv_label_set_text(status_value, text);
+ 
+-    const bool has_card = info.capacity_bytes != 0;
+-    lv_label_set_text(card_value, has_card && info.card_name[0] ? info.card_name : "--");
+-    if (has_card) {
++    const bool has_volume = info.capacity_bytes != 0;
++    lv_label_set_text(card_value, has_volume && info.card_name[0] ? info.card_name : "--");
++    if (has_volume) {
+         formatBytes(info.capacity_bytes, text, sizeof(text));
+         lv_label_set_text(capacity_value, text);
+         formatBytes(info.free_bytes, text, sizeof(text));
+         lv_label_set_text(free_value, text);
+-        lv_label_set_text_fmt(bus_value, "SDMMC %lu-bit",
+-                              static_cast<unsigned long>(info.bus_width));
+-        lv_label_set_text_fmt(frequency_value, "%.1f MHz",
+-                              static_cast<double>(info.frequency_khz) / 1000.0);
++        lv_label_set_text(bus_value, "Internal flash");
++        lv_label_set_text(frequency_value, "FAT + wear levelling");
+     } else {
+         lv_label_set_text(capacity_value, "--");
+         lv_label_set_text(free_value, "--");
+-        lv_label_set_text(bus_value, "SDMMC 1-bit");
+-        lv_label_set_text(frequency_value, "--");
++        lv_label_set_text(bus_value, "Internal flash");
++        lv_label_set_text(frequency_value, "FAT + wear levelling");
+     }
+ 
+     if (info_result != ESP_OK && info.state != STORAGE_SERVICE_STATE_ERROR) {
+-        ESP_UTILS_LOGW("Read SD information failed: %s", esp_err_to_name(info_result));
++        ESP_UTILS_LOGW("Read media information failed: %s", esp_err_to_name(info_result));
+     }
+ }
+ 
+@@ -567,6 +562,9 @@ void StoragePage::applyWorkerResult(const WorkerResult &result)
+                 result.operation_result == ESP_ERR_INVALID_STATE && result.info.active_leases > 0) {
+             snprintf(message, sizeof(message), "Busy: close media apps in Recents (%lu user(s))",
+                      static_cast<unsigned long>(result.info.active_leases));
++        } else if (result.command == WorkerCommand::Benchmark &&
++                   result.operation_result == ESP_ERR_INVALID_SIZE) {
++            strlcpy(message, "Not enough free media space for 4 MiB test", sizeof(message));
+         } else {
+             snprintf(message, sizeof(message), "Failed: %s",
+                      esp_err_to_name(result.operation_result));
+@@ -574,7 +572,7 @@ void StoragePage::applyWorkerResult(const WorkerResult &result)
+     } else {
+         switch (result.command) {
+         case WorkerCommand::Refresh:
+-            strlcpy(message, "Card scan complete", sizeof(message));
++            strlcpy(message, "Media ready", sizeof(message));
+             break;
+         case WorkerCommand::Benchmark:
+             lv_label_set_text_fmt(write_value, "%.2f MiB/s", result.benchmark.write_mib_per_s);
+@@ -587,7 +585,7 @@ void StoragePage::applyWorkerResult(const WorkerResult &result)
+                      static_cast<unsigned long>(result.benchmark.actual_crc32));
+             break;
+         case WorkerCommand::Eject:
+-            strlcpy(message, "Safe to remove card", sizeof(message));
++            strlcpy(message, "Unmounted; use Mount / retry to resume", sizeof(message));
+             break;
+         case WorkerCommand::ExportDiagnostics:
+             snprintf(message, sizeof(message), "Saved: %s", result.diagnostics_path);
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.cpp b/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.cpp
+index 6a85178..c936c60 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.cpp
+@@ -163,7 +163,7 @@ bool VideoPlayer::run()
+     lv_obj_align(_hero_icon, LV_ALIGN_CENTER, 0, -42);
+ 
+     _status_label = lv_label_create(_screen);
+-    lv_label_set_text(_status_label, "Mounting SD card...");
++    lv_label_set_text(_status_label, "Opening internal media...");
+     lv_obj_set_width(_status_label, 360);
+     lv_obj_set_style_text_align(_status_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+     lv_obj_set_style_text_font(_status_label, &lv_font_montserrat_16, LV_PART_MAIN);
+@@ -399,7 +399,7 @@ bool VideoPlayer::startWorker()
+     }
+ 
+     // A failed deinit/codec shutdown deliberately retains every callback,
+-    // FILE, owner token, and SD lease. Retry that cleanup before a new worker
++    // FILE, owner token, and media lease. Retry that cleanup before a new worker
+     // is allowed to overwrite any handle or ownership flag.
+     const bool retained_resources =
+         _avi != nullptr || _jpeg != nullptr || _files != nullptr ||
+@@ -439,7 +439,7 @@ bool VideoPlayer::startWorker()
+     TaskHandle_t task = nullptr;
+     BaseType_t result = xTaskCreatePinnedToCore(
+         workerTask,
+-        "sd_avi_control",
++        "media_avi_control",
+         8 * 1024,
+         this,
+         4,
+@@ -638,7 +638,7 @@ bool VideoPlayer::cleanupPlaybackResources()
+             _last_error.store(deinit_result);
+             _cleanup_complete.store(false);
+             ESP_UTILS_LOGE(
+-                "AVI deinit failed; retaining SD lease and callback resources: %s",
++                "AVI deinit failed; retaining media lease and callback resources: %s",
+                 esp_err_to_name(deinit_result)
+             );
+             return false;
+@@ -869,9 +869,12 @@ void VideoPlayer::workerTask(void *arg)
+     if (result == ESP_OK) {
+         self->_state.store(State::Scanning);
+         result = self->scanVideos();
+-    }
+-    if (result == ESP_ERR_NOT_FOUND) {
+-        self->_state.store(State::Empty);
++        if (result == ESP_ERR_NOT_FOUND) {
++            self->_state.store(State::Empty);
++        }
++    } else {
++        self->_last_error.store(result);
++        self->_state.store(State::Unavailable);
+     }
+     if (result == ESP_OK) {
+         self->_state.store(State::Preparing);
+@@ -984,7 +987,8 @@ void VideoPlayer::workerTask(void *arg)
+ 
+     if (!cleanup_ok) {
+         self->_state.store(State::Error);
+-    } else if (!self->_stop_requested.load() && self->_state.load() != State::Empty) {
++    } else if (!self->_stop_requested.load() && self->_state.load() != State::Empty &&
++               self->_state.load() != State::Unavailable) {
+         self->_last_error.store(result);
+         self->_state.store(State::Error);
+     } else if (self->_stop_requested.load()) {
+@@ -1095,12 +1099,15 @@ void VideoPlayer::updateUi()
+     if (_status_label) {
+         const char *text = nullptr;
+         switch (state) {
+-        case State::Mounting: text = "Mounting SD card..."; break;
++        case State::Mounting: text = "Opening internal media..."; break;
+         case State::Scanning: text = "Scanning AVI videos..."; break;
+         case State::Preparing: text = "Preparing video..."; break;
+         case State::Paused: text = "Paused"; break;
+         case State::Empty:
+-            text = "No AVI videos\nCopy MJPEG AVI to /sdcard/avi";
++            text = "No AVI videos\nCopy MJPEG AVI to /media/video";
++            break;
++        case State::Unavailable:
++            text = "Media unavailable\nMount / retry in Settings > Storage";
+             break;
+         case State::Error:
+             text = "Cannot play this AVI\nUse MJPEG video + PCM audio";
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.hpp b/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.hpp
+index 648a4ee..851ec3a 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.hpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/VideoPlayer/VideoPlayer.hpp
+@@ -44,6 +44,7 @@ private:
+         Playing,
+         Paused,
+         Empty,
++        Unavailable,
+         Error,
+         Stopping,
+     };
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/XiaozhiApp/XiaozhiApp.cpp b/ports/waveshare-1.75/firmware/brookesia/components/XiaozhiApp/XiaozhiApp.cpp
+index 7f8fa51..11ffe08 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/XiaozhiApp/XiaozhiApp.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/components/XiaozhiApp/XiaozhiApp.cpp
+@@ -1150,7 +1150,7 @@ void XiaozhiApp::handleControlEvent(const ControlEvent &event)
+             if (history_ret != ESP_OK && history_ret != ESP_ERR_INVALID_STATE &&
+                     history_ret != ESP_ERR_TIMEOUT) {
+                 ESP_UTILS_LOGW(
+-                    "Queue SD chat history failed: %s",
++                    "Queue chat history failed: %s",
+                     esp_err_to_name(history_ret)
+                 );
+             }
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/CMakeLists.txt
+index 0b5a743..ac73c43 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/CMakeLists.txt
+@@ -15,8 +15,8 @@ endforeach()
+ idf_component_register(
+     SRCS ${SRCS}
+     INCLUDE_DIRS ${INCLUDE_DIRS}
+-    REQUIRES driver esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_ledc
+-    PRIV_REQUIRES esp_timer fatfs esp_psram esp_mm
++    REQUIRES driver esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_ledc espressif__esp_codec_dev
++    PRIV_REQUIRES esp_timer esp_psram esp_mm
+ )
+ 
+ target_compile_options(
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README.md b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README.md
+index 11eb444..67181f7 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README.md
++++ b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README.md
+@@ -81,7 +81,7 @@ play request. A client must follow this order:
+ 
+ 1. Acquire its owner token.
+ 2. Initialize or reconfigure the codec and start its worker or file operation.
+-3. Stop callbacks and workers, then close every file or SD-backed resource.
++3. Stop callbacks and workers, then close every file or storage-backed resource.
+ 4. Delete the player or stop the codec streams and confirm cleanup succeeded.
+ 5. Release the audio owner token.
+ 
+@@ -101,7 +101,7 @@ After a successful `audio_player_play()` handoff, the audio player owns the
+ `FILE` and closes it. If handoff fails, the caller remains responsible for
+ closing the file. `bsp_extra_player_del()` first waits for the overridden audio
+ player to delete safely, then clears local state and closes capture before
+-playback. Callers must not release an SD mount lease or the audio owner until
++playback. Callers must not release a media mount lease or the audio owner until
+ this function succeeds.
+ 
+ ## Validation
+@@ -110,4 +110,4 @@ Audio changes require the MusicPlayer, Recorder, SpecAnalyzer, VideoPlayer, and
+ AIChats switching checks in
+ [`../../HARDWARE_VALIDATION.md`](../../HARDWARE_VALIDATION.md). Confirm the PA
+ log reports the expected state, both ES7210 microphone channels carry data, and
+-rapid application exit does not leave an audio owner or SD file behind.
++rapid application exit does not leave an audio owner or media file behind.
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README_ZH.md b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README_ZH.md
+index 09cbba2..24b7407 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README_ZH.md
++++ b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/README_ZH.md
+@@ -72,7 +72,7 @@ ES8311、ES7210、I2S 控制器、时钟和 PA 共同组成一套共享会话。
+ 
+ 1. 获取自己的所有者令牌。
+ 2. 初始化或重新配置编解码器，然后启动工作任务或文件操作。
+-3. 停止回调和工作任务，再关闭所有文件或依赖 SD 卡的资源。
++3. 停止回调和工作任务，再关闭所有文件或依赖存储卷的资源。
+ 4. 删除播放器或停止编解码器流，并确认清理成功。
+ 5. 释放音频所有者令牌。
+ 
+@@ -89,7 +89,7 @@ ES8311、ES7210、I2S 控制器、时钟和 PA 共同组成一套共享会话。
+ 成功交给 `audio_player_play()` 后，`FILE` 的所有权转移给音频播放器，并由播放器
+ 关闭。如果交接失败，调用者仍负责关闭文件。`bsp_extra_player_del()` 会先等待安全
+ 覆盖版音频播放器完成删除，再清除本地状态，并按照先采集、后播放的顺序关闭流。
+-只有该函数成功后，调用者才能释放 SD 挂载租约或音频所有者。
++只有该函数成功后，调用者才能释放媒体挂载租约或音频所有者。
+ 
+ ## 验证
+ 
+@@ -97,4 +97,4 @@ ES8311、ES7210、I2S 控制器、时钟和 PA 共同组成一套共享会话。
+ [`../../HARDWARE_VALIDATION_ZH.md`](../../HARDWARE_VALIDATION_ZH.md) 中
+ MusicPlayer、Recorder、SpecAnalyzer、VideoPlayer 和 AIChats 之间的切换测试。
+ 确认 PA 日志反映预期状态、ES7210 的两个麦克风通道均有数据，而且快速退出应用
+-不会遗留音频所有者或 SD 文件。
++不会遗留音频所有者或媒体文件。
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/idf_component.yml b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/idf_component.yml
+index 95fd733..278bdb0 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/idf_component.yml
++++ b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/idf_component.yml
+@@ -4,6 +4,7 @@ dependencies:
+ 
+   waveshare/esp32_s3_touch_amoled_1_75:
+     version: "3.0.1"
++    public: true
+ 
+   chmorgan/esp-audio-player:
+     version: "1.1.0"
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/src/bsp_board_extra.c b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/src/bsp_board_extra.c
+index c23b2e7..79bd3e5 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/src/bsp_board_extra.c
++++ b/ports/waveshare-1.75/firmware/brookesia/components/bsp_extra/src/bsp_board_extra.c
+@@ -15,7 +15,6 @@
+ #include "esp_codec_dev_defaults.h"
+ #include "esp_err.h"
+ #include "esp_log.h"
+-#include "esp_vfs_fat.h"
+ #include "driver/i2c.h"
+ #include "driver/i2s_std.h"
+ #include "driver/gpio.h"
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/chat_history/chat_history.c b/ports/waveshare-1.75/firmware/brookesia/components/chat_history/chat_history.c
+index ccebcaa..0fa05d2 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/chat_history/chat_history.c
++++ b/ports/waveshare-1.75/firmware/brookesia/components/chat_history/chat_history.c
+@@ -107,8 +107,7 @@ static esp_err_t persist_enabled_preference(bool enabled)
+ static esp_err_t ensure_history_directories(void)
+ {
+     const char *paths[] = {
+-        STORAGE_SERVICE_MOUNT_POINT "/Waveshare",
+-        STORAGE_SERVICE_MOUNT_POINT "/Waveshare/AIChats",
++        STORAGE_SERVICE_MOUNT_POINT "/history",
+     };
+     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+         if (mkdir(paths[i], 0775) != 0 && errno != EEXIST) {
+@@ -281,7 +280,7 @@ static void make_session_path(char *path, size_t path_size, uint32_t generation)
+             path,
+             path_size,
+             STORAGE_SERVICE_MOUNT_POINT
+-            "/Waveshare/AIChats/session-%04d%02d%02d-%02d%02d%02d-g%lu.jsonl",
++            "/history/session-%04d%02d%02d-%02d%02d%02d-g%lu.jsonl",
+             local.tm_year + 1900,
+             local.tm_mon + 1,
+             local.tm_mday,
+@@ -294,7 +293,7 @@ static void make_session_path(char *path, size_t path_size, uint32_t generation)
+         snprintf(
+             path,
+             path_size,
+-            STORAGE_SERVICE_MOUNT_POINT "/Waveshare/AIChats/session-boot-%lld-g%lu.jsonl",
++            STORAGE_SERVICE_MOUNT_POINT "/history/session-boot-%lld-g%lu.jsonl",
+             (long long)(esp_timer_get_time() / 1000),
+             (unsigned long)generation
+         );
+@@ -379,7 +378,7 @@ static esp_err_t write_message(const chat_history_message_t *message)
+     if (failed_step) {
+         // fclose is deliberately completed before truncating.  Otherwise a
+         // pending stdio buffer could append bytes again after an early
+-        // ftruncate.  ESP-IDF's FatFs VFS implements truncate() for SD cards.
++        // ftruncate.  ESP-IDF's FatFs VFS implements truncate() for FAT volumes.
+         log_append_rollback(session_path, append_start, failed_step, operation_errno);
+     }
+ 
+@@ -422,7 +421,7 @@ esp_err_t chat_history_init(void)
+         return ESP_ERR_NO_MEM;
+     }
+     s_initialized = true;
+-    ESP_LOGI(TAG, "SD text history %s", atomic_load(&s_enabled) ? "enabled" : "disabled");
++    ESP_LOGI(TAG, "internal text history %s", atomic_load(&s_enabled) ? "enabled" : "disabled");
+     return ESP_OK;
+ }
+ 
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/chat_history/include/chat_history.h b/ports/waveshare-1.75/firmware/brookesia/components/chat_history/include/chat_history.h
+index cbbde7f..6c8a7c4 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/chat_history/include/chat_history.h
++++ b/ports/waveshare-1.75/firmware/brookesia/components/chat_history/include/chat_history.h
+@@ -13,10 +13,10 @@
+ extern "C" {
+ #endif
+ 
+-/** Start the low-priority, non-blocking SD history writer. */
++/** Start the low-priority, non-blocking internal history writer. */
+ esp_err_t chat_history_init(void);
+ 
+-/** Enable or disable SD text history and persist the preference in NVS. */
++/** Enable or disable internal text history and persist the preference in NVS. */
+ esp_err_t chat_history_set_enabled(bool enabled);
+ 
+ bool chat_history_is_enabled(void);
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/CMakeLists.txt
+index 8d447a7..a96b1e6 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ idf_component_register(
+     SRCS "storage_service.c"
+     INCLUDE_DIRS "include"
+-    REQUIRES esp32_s3_touch_amoled_1_75 fatfs esp_hw_support esp_timer
++    REQUIRES fatfs wear_levelling esp_hw_support esp_timer
+ )
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/include/storage_service.h b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/include/storage_service.h
+index fb06195..04502a9 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/include/storage_service.h
++++ b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/include/storage_service.h
+@@ -15,7 +15,8 @@
+ extern "C" {
+ #endif
+ 
+-#define STORAGE_SERVICE_MOUNT_POINT "/sdcard"
++#define STORAGE_SERVICE_MOUNT_POINT "/media"
++#define STORAGE_SERVICE_PARTITION_LABEL "media"
+ 
+ typedef enum {
+     STORAGE_SERVICE_STATE_UNINITIALIZED = 0,
+@@ -31,9 +32,11 @@ typedef struct {
+     esp_err_t last_error;
+     uint32_t generation;
+     uint32_t active_leases;
++    /* Legacy field name retained for callers; identifies the internal volume. */
+     char card_name[20];
+     uint64_t capacity_bytes;
+     uint64_t free_bytes;
++    /* Zero for internal media: not an SD bus or removable card. */
+     uint32_t bus_width;
+     uint32_t frequency_khz;
+ } storage_service_info_t;
+@@ -61,22 +64,22 @@ typedef struct {
+     esp_err_t result;
+ } storage_service_benchmark_t;
+ 
+-/** Initialize the singleton service without requiring a card to be present. */
++/** Initialize the singleton service without mounting or formatting the internal media volume. */
+ esp_err_t storage_service_init(void);
+ 
+ /** Mount or re-check the volume. Safe to call repeatedly. */
+ esp_err_t storage_service_mount(void);
+ 
+-/** Acquire an inactive, zero-initialized lease, mounting the card on demand. */
++/** Acquire an inactive, zero-initialized lease, mounting the internal media volume on demand. */
+ esp_err_t storage_service_acquire(storage_service_lease_t *lease);
+ 
+ /** Release a previously acquired lease. Safe to call on an inactive lease. */
+ void storage_service_release(storage_service_lease_t *lease);
+ 
+-/** Unmount the card only when no application holds a lease. */
++/** Unmount the volume only when no application holds a lease. */
+ esp_err_t storage_service_safe_eject(void);
+ 
+-/** Copy a coherent snapshot of the current card/service state. */
++/** Copy a coherent snapshot of the current volume/service state. */
+ esp_err_t storage_service_get_info(storage_service_info_t *info);
+ 
+ /** Run a write/read/CRC benchmark using a newly-created private temporary file. */
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/storage_service.c b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/storage_service.c
+index 5d72993..afda2cf 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/storage_service/storage_service.c
++++ b/ports/waveshare-1.75/firmware/brookesia/components/storage_service/storage_service.c
+@@ -12,17 +12,17 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/stat.h>
+ 
+-#include "bsp/esp-bsp.h"
+ #include "esp_crc.h"
+ #include "esp_log.h"
+ #include "esp_timer.h"
+ #include "esp_vfs_fat.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/semphr.h"
+-#include "sdmmc_cmd.h"
++#include "wear_levelling.h"
+ 
+-#define STORAGE_BENCHMARK_PATH_FORMAT STORAGE_SERVICE_MOUNT_POINT "/.waveshare-sd-benchmark-%08lx.tmp"
++#define STORAGE_BENCHMARK_PATH_FORMAT STORAGE_SERVICE_MOUNT_POINT "/.waveshare-media-benchmark-%08lx.tmp"
+ #define STORAGE_BENCHMARK_PATH_SIZE   96
+ #define STORAGE_BENCHMARK_CHUNK_SIZE (16 * 1024)
+ 
+@@ -39,6 +39,7 @@ static uint32_t s_active_leases;
+ static bool s_volume_mounted;
+ static bool s_benchmark_active;
+ static bool s_safe_ejected;
++static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
+ 
+ static esp_err_t ensure_initialized(void)
+ {
+@@ -66,46 +67,23 @@ static void clear_card_details(storage_service_info_t *info)
+ static esp_err_t populate_card_details_locked(storage_service_info_t *info)
+ {
+     clear_card_details(info);
+-    if (!s_volume_mounted || bsp_sdcard == NULL) {
++    if (!s_volume_mounted || s_wl_handle == WL_INVALID_HANDLE) {
+         return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    strlcpy(info->card_name, bsp_sdcard->cid.name, sizeof(info->card_name));
+-    info->capacity_bytes =
+-        (uint64_t)bsp_sdcard->csd.capacity * (uint64_t)bsp_sdcard->csd.sector_size;
+-    if (bsp_sdcard->host.get_bus_width != NULL) {
+-        const size_t width = bsp_sdcard->host.get_bus_width(bsp_sdcard->host.slot);
+-        info->bus_width = width <= UINT32_MAX ? (uint32_t)width : 0;
+-    }
+-    if (info->bus_width == 0) {
+-        info->bus_width = 1U << bsp_sdcard->log_bus_width;
+-    }
+-    info->frequency_khz = bsp_sdcard->real_freq_khz > 0
+-                              ? (uint32_t)bsp_sdcard->real_freq_khz
+-                              : bsp_sdcard->max_freq_khz;
+-
+-    uint64_t filesystem_total = 0;
+-    uint64_t filesystem_free = 0;
+-    const esp_err_t result = esp_vfs_fat_info(
+-        STORAGE_SERVICE_MOUNT_POINT, &filesystem_total, &filesystem_free
+-    );
+-    if (result == ESP_OK) {
+-        info->free_bytes = filesystem_free;
+-    }
+-    return result;
++    strlcpy(info->card_name, "Internal flash", sizeof(info->card_name));
++    // Report usable FAT clusters, not the raw partition size (which includes
++    // wear-levelling state and filesystem metadata). Both numbers use the
++    // filesystem's configured sector size, including 4096-byte sectors.
++    return esp_vfs_fat_info(STORAGE_SERVICE_MOUNT_POINT,
++                            &info->capacity_bytes, &info->free_bytes);
+ }
+ 
+-static esp_err_t probe_card_locked(void)
++static esp_err_t probe_volume_locked(void)
+ {
+-    if (!s_volume_mounted || bsp_sdcard == NULL) {
++    if (!s_volume_mounted || s_wl_handle == WL_INVALID_HANDLE) {
+         return ESP_ERR_INVALID_STATE;
+     }
+-
+-    esp_err_t result = sdmmc_get_status(bsp_sdcard);
+-    if (result != ESP_OK) {
+-        return result;
+-    }
+-
+     uint64_t filesystem_total = 0;
+     uint64_t filesystem_free = 0;
+     return esp_vfs_fat_info(
+@@ -113,6 +91,31 @@ static esp_err_t probe_card_locked(void)
+     );
+ }
+ 
++static void ensure_media_directories_locked(void)
++{
++    const char *directories[] = {
++        STORAGE_SERVICE_MOUNT_POINT "/music",
++        STORAGE_SERVICE_MOUNT_POINT "/pictures",
++        STORAGE_SERVICE_MOUNT_POINT "/video",
++        STORAGE_SERVICE_MOUNT_POINT "/recordings",
++        STORAGE_SERVICE_MOUNT_POINT "/history",
++        STORAGE_SERVICE_MOUNT_POINT "/diagnostics",
++    };
++    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); ++i) {
++        struct stat status;
++        if (stat(directories[i], &status) == 0 && S_ISDIR(status.st_mode)) {
++            continue;
++        }
++        if (mkdir(directories[i], 0775) != 0) {
++            // Keep existing media readable on a full volume. Writers report
++            // their own directory/open failures; mounting never formats or
++            // deletes files to make space.
++            ESP_LOGW(TAG, "Media directory unavailable: %s (%s)",
++                     directories[i], strerror(errno));
++        }
++    }
++}
++
+ static esp_err_t unmount_locked(void)
+ {
+     if (!s_volume_mounted) {
+@@ -122,12 +125,16 @@ static esp_err_t unmount_locked(void)
+     }
+ 
+     s_state = STORAGE_SERVICE_STATE_EJECTING;
+-    const esp_err_t result = bsp_sdcard_unmount();
+-    if (result == ESP_OK || result == ESP_ERR_INVALID_STATE) {
+-        s_volume_mounted = false;
++    const esp_err_t result = esp_vfs_fat_spiflash_unmount_rw_wl(
++        STORAGE_SERVICE_MOUNT_POINT, s_wl_handle);
++    // IDF tears down the VFS and WL handle even if flushing the WL state
++    // fails. Never advertise that torn-down volume as mounted on an error.
++    s_wl_handle = WL_INVALID_HANDLE;
++    s_volume_mounted = false;
++    ++s_generation;
++    if (result == ESP_OK) {
+         s_state = STORAGE_SERVICE_STATE_UNMOUNTED;
+         s_last_error = ESP_OK;
+-        ++s_generation;
+         return ESP_OK;
+     }
+ 
+@@ -152,12 +159,12 @@ static esp_err_t mount_locked(bool probe_existing)
+         }
+         if (probe_existing && s_active_leases != 0) {
+             // A lease can own active stdio/FatFs objects. Do not issue an
+-            // out-of-band card probe or remount underneath those objects. The
++            // out-of-band filesystem probe or remount underneath those objects. The
+             // caller can retry the explicit rescan after the owners finish.
+             return ESP_ERR_INVALID_STATE;
+         }
+         const esp_err_t probe_result =
+-            (probe_existing || recover_error) ? probe_card_locked() : ESP_OK;
++            (probe_existing || recover_error) ? probe_volume_locked() : ESP_OK;
+         if (probe_result == ESP_OK) {
+             s_state = STORAGE_SERVICE_STATE_MOUNTED;
+             s_last_error = ESP_OK;
+@@ -179,12 +186,25 @@ static esp_err_t mount_locked(bool probe_existing)
+     }
+ 
+     s_state = STORAGE_SERVICE_STATE_MOUNTING;
+-    const esp_err_t result = bsp_sdcard_mount();
++    const esp_vfs_fat_mount_config_t config = {
++        .format_if_mount_failed = false,
++        .max_files = 12,
++        .allocation_unit_size = 4096,
++    };
++    const esp_err_t result = esp_vfs_fat_spiflash_mount_rw_wl(
++        STORAGE_SERVICE_MOUNT_POINT, STORAGE_SERVICE_PARTITION_LABEL,
++        &config, &s_wl_handle);
+     if (result != ESP_OK) {
++        // IDF 5.5's mount failure path unregisters FAT/VFS but can leave the
++        // already-created WL instance allocated. Release it before retrying.
++        if (s_wl_handle != WL_INVALID_HANDLE) {
++            (void)wl_unmount(s_wl_handle);
++            s_wl_handle = WL_INVALID_HANDLE;
++        }
+         s_volume_mounted = false;
+         s_state = STORAGE_SERVICE_STATE_ERROR;
+         s_last_error = result;
+-        ESP_LOGW(TAG, "SD mount failed: %s", esp_err_to_name(result));
++        ESP_LOGW(TAG, "Internal media mount failed (no formatting attempted): %s", esp_err_to_name(result));
+         return result;
+     }
+ 
+@@ -192,7 +212,8 @@ static esp_err_t mount_locked(bool probe_existing)
+     s_state = STORAGE_SERVICE_STATE_MOUNTED;
+     s_last_error = ESP_OK;
+     ++s_generation;
+-    ESP_LOGI(TAG, "SD mounted at %s (generation %lu)", STORAGE_SERVICE_MOUNT_POINT,
++    ensure_media_directories_locked();
++    ESP_LOGI(TAG, "Internal media mounted at %s (generation %lu)", STORAGE_SERVICE_MOUNT_POINT,
+              (unsigned long)s_generation);
+     return ESP_OK;
+ }
+@@ -277,7 +298,7 @@ esp_err_t storage_service_mount(void)
+ 
+     xSemaphoreTake(s_mutex, portMAX_DELAY);
+     // An explicit rescan is the operation that re-arms on-demand mounting
+-    // after the user selected Safe eject.
++    // after the user selected Unmount.
+     s_safe_ejected = false;
+     result = mount_locked(true);
+     xSemaphoreGive(s_mutex);
+@@ -306,9 +327,8 @@ esp_err_t storage_service_acquire(storage_service_lease_t *lease)
+     if (s_safe_ejected) {
+         result = ESP_ERR_INVALID_STATE;
+     } else {
+-        /* The first lease after an idle period must validate the mounted card.
+-         * This recovers from an unexpected remove/reinsert without requiring a
+-         * Settings rescan. Never probe or remount underneath an active lease,
++        /* The first lease after an idle period validates the filesystem.
++         * This allows recovery from transient errors without a Settings retry. Never probe or remount underneath an active lease,
+          * because it may still own FILE/FatFs objects. */
+         result = mount_locked(s_active_leases == 0);
+     }
+@@ -331,7 +351,7 @@ void storage_service_release(storage_service_lease_t *lease)
+     if (lease->generation == s_generation && s_active_leases > 0) {
+         --s_active_leases;
+     } else {
+-        ESP_LOGW(TAG, "Ignoring stale SD lease (lease generation %lu, current %lu)",
++        ESP_LOGW(TAG, "Ignoring stale media lease (lease generation %lu, current %lu)",
+                  (unsigned long)lease->generation, (unsigned long)s_generation);
+     }
+     lease->generation = 0;
+@@ -350,13 +370,13 @@ esp_err_t storage_service_safe_eject(void)
+     if (s_active_leases != 0) {
+         result = ESP_ERR_INVALID_STATE;
+         s_last_error = result;
+-        ESP_LOGW(TAG, "Safe eject refused: %lu active lease(s)",
++        ESP_LOGW(TAG, "Unmount refused: %lu active lease(s)",
+                  (unsigned long)s_active_leases);
+     } else {
+         result = unmount_locked();
+         if (result == ESP_OK) {
+             // Background producers (for example chat history) must not mount
+-            // the card again between this confirmation and physical removal.
++            // the volume again until the user explicitly selects Mount / retry.
+             s_safe_ejected = true;
+         }
+     }
+@@ -434,6 +454,17 @@ esp_err_t storage_service_run_benchmark(size_t bytes, storage_service_benchmark_
+ 
+     char benchmark_path[STORAGE_BENCHMARK_PATH_SIZE] = {0};
+     FILE *file = NULL;
++    storage_service_info_t info = {0};
++    operation_result = storage_service_get_info(&info);
++    if (operation_result != ESP_OK) {
++        goto cleanup;
++    }
++    if (bytes > info.free_bytes) {
++        operation_result = ESP_ERR_INVALID_SIZE;
++        goto cleanup;
++    }
++    // Other lease owners may write concurrently after this preflight. Keep
++    // checking short writes, flush and sync errors, and remove only our file.
+     operation_result = create_benchmark_file(benchmark_path, sizeof(benchmark_path), &file);
+     if (operation_result != ESP_OK) {
+         goto cleanup;
+@@ -527,13 +558,13 @@ const char *storage_service_state_name(storage_service_state_t state)
+     case STORAGE_SERVICE_STATE_UNINITIALIZED:
+         return "Uninitialized";
+     case STORAGE_SERVICE_STATE_UNMOUNTED:
+-        return "Ejected";
++        return "Unmounted";
+     case STORAGE_SERVICE_STATE_MOUNTING:
+         return "Mounting";
+     case STORAGE_SERVICE_STATE_MOUNTED:
+         return "Mounted";
+     case STORAGE_SERVICE_STATE_EJECTING:
+-        return "Ejecting";
++        return "Unmounting";
+     case STORAGE_SERVICE_STATE_ERROR:
+         return "Unavailable";
+     default:
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/CMakeLists.txt
+index b02beab..506ced0 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ if("${IDF_VERSION_MAJOR}.${IDF_VERSION_MINOR}" VERSION_GREATER_EQUAL "5.5")
+-    set(REQ esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_sdmmc)
++    set(REQ esp_driver_gpio esp_driver_i2c esp_driver_i2s)
+     set(PRIV_REQ esp_driver_ledc)
+ else()
+     set(REQ driver)
+@@ -15,5 +15,5 @@ idf_component_register(
+     INCLUDE_DIRS "include" "include/bsp"
+     PRIV_INCLUDE_DIRS "priv_include"
+     REQUIRES ${REQ} esp_lcd
+-    PRIV_REQUIRES ${PRIV_REQ} esp_timer spiffs esp_psram fatfs
++    PRIV_REQUIRES ${PRIV_REQ} esp_timer spiffs esp_psram
+ )
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/Kconfig b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/Kconfig
+index 263f565..5745d8a 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/Kconfig
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/Kconfig
+@@ -52,20 +52,6 @@ menu "Board Support Package"
+                 Supported max files for SPIFFS in the Virtual File System.
+     endmenu
+ 
+-    menu "uSD card - Virtual File System"
+-        config BSP_SD_FORMAT_ON_MOUNT_FAIL
+-            bool "Format uSD card if mounting fails"
+-            default n
+-            help
+-                The SDMMC host will format (FAT) the uSD card if it fails to mount the filesystem.
+-
+-        config BSP_SD_MOUNT_POINT
+-            string "uSD card mount point"
+-            default "/sdcard"
+-            help
+-                Mount point of the uSD card in the Virtual File System
+-
+-    endmenu
+     menu "Display"
+         config BSP_LCD_TRANS_QUEUE_DEPTH
+             int "Set The depth of the SPI transmission task queue for the SPI screen"
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/README.md b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/README.md
+index e65441b..6905732 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/README.md
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/README.md
+@@ -1,9 +1,13 @@
+-# BSP: Waveshare ESP32-S3-Touch-AMOLED-1.75
++# BSP: Waveshare ESP32-S3-Touch-AMOLED-1.75C
+ 
+ [![Component Registry](https://components.espressif.com/components/waveshare/esp32_s3_touch_amoled_1_75/badge.svg)](https://components.espressif.com/components/waveshare/esp32_s3_touch_amoled_1_75)
+ 
+-The ESP32-S3-Touch-AMOLED-1.75 is a 1.75-inch 466×466 capacitive touch development board designed by waveshare electronics.
++This local BSP adapts the Waveshare ESP32-S3-Touch-AMOLED-1.75 source for the
++1.75C board. It retains the enhanced audio APIs used by Brookesia, maps display
++reset to GPIO1, touch reset to GPIO2, and audio MCLK to GPIO16. PWR is an
++active-high input on GPIO3; BOOT is an active-low input on GPIO0. The 1.75C
++has no microSD socket or TCA9554 expander, so neither is accessed by this BSP.
+ 
+ |                            HW version                            | BSP Version |
+ |:----------------------------------------------------------------:| :---------: |
+-| [V1.0](http://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75) |      ^1     |
+\ No newline at end of file
++| [1.75C](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75C) | Local adaptation |
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/esp32_s3_touch_amoled_1_75.c b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/esp32_s3_touch_amoled_1_75.c
+index 1a442a1..090b5fe 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/esp32_s3_touch_amoled_1_75.c
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/esp32_s3_touch_amoled_1_75.c
+@@ -6,7 +6,6 @@
+ #include "esp_err.h"
+ #include "esp_log.h"
+ #include "esp_check.h"
+-#include "esp_vfs_fat.h"
+ #include "esp_spiffs.h"
+ #include "driver/gpio.h"
+ #include "driver/ledc.h"
+@@ -22,13 +21,11 @@
+ #include "bsp/display.h"
+ #include "bsp/touch.h"
+ 
+-static const char *TAG = "ESP32-S3-Touch-AMOLED-1.75";
++static const char *TAG = "ESP32-S3-Touch-AMOLED-1.75C";
+ 
+ static i2c_master_bus_handle_t i2c_handle = NULL; // I2C Handle
+ static bool i2c_initialized = false;
+-static esp_io_expander_handle_t io_expander = NULL; // IO expander tca9554 handle
+ static lv_indev_t *disp_indev = NULL;
+-sdmmc_card_t *bsp_sdcard = NULL; // Global uSD card handler
+ static esp_lcd_touch_handle_t tp = NULL;
+ static esp_lcd_panel_handle_t panel_handle = NULL; // LCD panel handle
+ static esp_lcd_panel_io_handle_t io_handle = NULL;
+@@ -180,55 +177,6 @@ esp_err_t bsp_spiffs_unmount(void)
+     return esp_vfs_spiffs_unregister(CONFIG_BSP_SPIFFS_PARTITION_LABEL);
+ }
+ 
+-esp_err_t bsp_sdcard_mount(void)
+-{
+-    const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+-#ifdef CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL
+-        .format_if_mount_failed = true,
+-#else
+-        .format_if_mount_failed = false,
+-#endif
+-        .max_files = 12,
+-        .allocation_unit_size = 16 * 1024};
+-
+-    const sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+-    const sdmmc_slot_config_t slot_config = {
+-        .clk = BSP_SD_CLK,
+-        .cmd = BSP_SD_CMD,
+-        .d0 = BSP_SD_D0,
+-        .d1 = GPIO_NUM_NC,
+-        .d2 = GPIO_NUM_NC,
+-        .d3 = GPIO_NUM_NC,
+-        .d4 = GPIO_NUM_NC,
+-        .d5 = GPIO_NUM_NC,
+-        .d6 = GPIO_NUM_NC,
+-        .d7 = GPIO_NUM_NC,
+-        .cd = SDMMC_SLOT_NO_CD,
+-        .wp = SDMMC_SLOT_NO_WP,
+-        .width = 1,
+-        .flags = 0,
+-    };
+-
+-#if !CONFIG_FATFS_LONG_FILENAMES
+-    ESP_LOGW(TAG, "Warning: Long filenames on SD card are disabled in menuconfig!");
+-#endif
+-
+-    return esp_vfs_fat_sdmmc_mount(BSP_SD_MOUNT_POINT, &host, &slot_config, &mount_config, &bsp_sdcard);
+-}
+-
+-esp_err_t bsp_sdcard_unmount(void)
+-{
+-    if (bsp_sdcard == NULL) {
+-        return ESP_ERR_INVALID_STATE;
+-    }
+-
+-    const esp_err_t result = esp_vfs_fat_sdcard_unmount(BSP_SD_MOUNT_POINT, bsp_sdcard);
+-    if (result == ESP_OK || result == ESP_ERR_INVALID_STATE) {
+-        bsp_sdcard = NULL;
+-    }
+-    return result;
+-}
+-
+ /**************************************************************************************************
+  *
+  * I2S Audio Function
+@@ -721,7 +669,7 @@ esp_err_t bsp_touch_new(const bsp_display_cfg_t *cfg, esp_lcd_touch_handle_t *re
+     const esp_lcd_touch_config_t tp_cfg = {
+         .x_max = BSP_LCD_H_RES,
+         .y_max = BSP_LCD_V_RES,
+-        .rst_gpio_num = BSP_LCD_TOUCH_RST, // Shared with LCD reset
++        .rst_gpio_num = BSP_LCD_TOUCH_RST,
+         .int_gpio_num = BSP_LCD_TOUCH_INT,
+         .levels = {
+             .reset = 0,
+@@ -740,45 +688,6 @@ esp_err_t bsp_touch_new(const bsp_display_cfg_t *cfg, esp_lcd_touch_handle_t *re
+     return esp_lcd_touch_new_i2c_cst9217(tp_io_handle, &tp_cfg, ret_touch);
+ }
+ 
+-/**************************************************************************************************
+- *
+- * IO Expander Function
+- *
+- **************************************************************************************************/
+-esp_err_t bsp_io_expander_try_init(esp_io_expander_handle_t *ret_expander)
+-{
+-    if (ret_expander == NULL)
+-    {
+-        return ESP_ERR_INVALID_ARG;
+-    }
+-    *ret_expander = NULL;
+-
+-    esp_err_t ret = bsp_i2c_try_init();
+-    if (ret != ESP_OK)
+-    {
+-        return ret;
+-    }
+-
+-    if (!io_expander)
+-    {
+-        ret = esp_io_expander_new_i2c_tca9554(i2c_handle, BSP_IO_EXPANDER_I2C_ADDRESS, &io_expander);
+-        if (ret != ESP_OK)
+-        {
+-            return ret;
+-        }
+-    }
+-
+-    *ret_expander = io_expander;
+-    return ESP_OK;
+-}
+-
+-esp_io_expander_handle_t bsp_io_expander_init(void)
+-{
+-    esp_io_expander_handle_t expander = NULL;
+-    BSP_ERROR_CHECK_RETURN_NULL(bsp_io_expander_try_init(&expander));
+-    return expander;
+-}
+-
+ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
+ {
+     assert(cfg != NULL);
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/idf_component.yml b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/idf_component.yml
+index c6469c9..612d83e 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/idf_component.yml
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/idf_component.yml
+@@ -2,9 +2,6 @@ dependencies:
+   esp_codec_dev:
+     public: true
+     version: ~1.5
+-  esp_io_expander_tca9554:
+-    public: true
+-    version: ^2
+   esp_lcd_co5300: '*'
+   esp_lcd_panel_io_additions: ^1
+   espressif/esp_lvgl_adapter:
+diff --git a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/include/bsp/esp32_s3_touch_amoled_1_75.h b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/include/bsp/esp32_s3_touch_amoled_1_75.h
+index ba5a24d..d644306 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/include/bsp/esp32_s3_touch_amoled_1_75.h
++++ b/ports/waveshare-1.75/firmware/brookesia/components/waveshare__esp32_s3_touch_amoled_1_75/include/bsp/esp32_s3_touch_amoled_1_75.h
+@@ -3,15 +3,12 @@
+ #include "sdkconfig.h"
+ #include "driver/gpio.h"
+ #include "driver/i2c_master.h"
+-#include "driver/sdmmc_host.h"
+ #include "driver/i2s_std.h"
+ #include "driver/i2s_tdm.h"
+ #include "bsp/config.h"
+ #include "bsp/display.h"
+ #include "esp_codec_dev.h"
+ 
+-#include "esp_io_expander_tca9554.h"
+-
+ #include "lvgl.h"
+ #include "esp_lv_adapter.h"
+ 
+@@ -26,11 +23,11 @@
+ #define BSP_CAPS_AUDIO          1
+ #define BSP_CAPS_AUDIO_SPEAKER  1
+ #define BSP_CAPS_AUDIO_MIC      1
+-#define BSP_CAPS_SDCARD         1
++#define BSP_CAPS_SDCARD         0
+ #define BSP_CAPS_IMU            0
+ 
+ /**************************************************************************************************
+- * ESP-SparkBot-BSP pinout
++ * ESP32-S3-Touch-AMOLED-1.75C pinout
+  **************************************************************************************************/
+ 
+ /* I2C */
+@@ -38,7 +35,7 @@
+ #define BSP_I2C_SDA           (GPIO_NUM_15)
+ 
+ #define BSP_I2S_SCLK          (GPIO_NUM_9)
+-#define BSP_I2S_MCLK          (GPIO_NUM_42)
++#define BSP_I2S_MCLK          (GPIO_NUM_16)
+ #define BSP_I2S_LCLK          (GPIO_NUM_45)
+ #define BSP_I2S_DOUT          (GPIO_NUM_8)
+ #define BSP_I2S_DSIN          (GPIO_NUM_10)
+@@ -53,16 +50,13 @@
+ #define BSP_LCD_DATA3     (GPIO_NUM_7)
+ 
+ #define BSP_LCD_BACKLIGHT     (GPIO_NUM_NC)
+-#define BSP_LCD_RST           (GPIO_NUM_39)
+-#define BSP_LCD_TOUCH_RST     (GPIO_NUM_40)
++#define BSP_LCD_RST           (GPIO_NUM_1)
++#define BSP_LCD_TOUCH_RST     (GPIO_NUM_2)
+ #define BSP_LCD_TOUCH_INT     (GPIO_NUM_11)
+ 
+-/* uSD card */
+-#define BSP_SD_D0            (GPIO_NUM_3)
+-#define BSP_SD_CMD           (GPIO_NUM_1)
+-#define BSP_SD_CLK           (GPIO_NUM_2)
+-
+-#define BSP_IO_EXPANDER_I2C_ADDRESS     (ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000)
++/* Physical keys: BOOT pulls low; PWR's BSS138 circuit drives high on press. */
++#define BSP_BUTTON_BOOT_GPIO  (GPIO_NUM_0)
++#define BSP_BUTTON_PWR_GPIO   (GPIO_NUM_3)
+ 
+ #define LVGL_BUFFER_HEIGHT          (CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT)
+ 
+@@ -74,9 +68,8 @@ extern "C" {
+  *
+  * I2C interface
+  *
+- * There are two devices connected to I2C peripheral:
+- *  - QMA7981 Inertial measurement unit
+- *  - OV2640 Camera module
++ * Shared bus for CST9217 touch, AXP2101 power management, QMI8658 IMU,
++ * and ES8311/ES7210 audio codecs.
+  **************************************************************************************************/
+ #define BSP_I2C_NUM     CONFIG_BSP_I2C_NUM
+ 
+@@ -238,70 +231,6 @@ esp_err_t bsp_spiffs_mount(void);
+  */
+ esp_err_t bsp_spiffs_unmount(void);
+ 
+-/**************************************************************************************************
+- *
+- * uSD card
+- *
+- * After mounting the uSD card, it can be accessed with stdio functions ie.:
+- * \code{.c}
+- * FILE* f = fopen(BSP_MOUNT_POINT"/hello.txt", "w");
+- * fprintf(f, "Hello %s!\n", bsp_sdcard->cid.name);
+- * fclose(f);
+- * \endcode
+- **************************************************************************************************/
+-#define BSP_SD_MOUNT_POINT      CONFIG_BSP_SD_MOUNT_POINT
+-extern sdmmc_card_t *bsp_sdcard;
+-
+-/**
+- * @brief Mount microSD card to virtual file system
+- *
+- * @return
+- *      - ESP_OK on success
+- *      - ESP_ERR_INVALID_STATE if esp_vfs_fat_sdmmc_mount was already called
+- *      - ESP_ERR_NO_MEM if memory cannot be allocated
+- *      - ESP_FAIL if partition cannot be mounted
+- *      - other error codes from SDMMC or SPI drivers, SDMMC protocol, or FATFS drivers
+- */
+-esp_err_t bsp_sdcard_mount(void);
+-
+-/**
+- * @brief Unmount microSD card from virtual file system
+- *
+- * @return
+- *      - ESP_OK on success
+- *      - ESP_ERR_INVALID_ARG if the card handle is not registered
+- *      - ESP_ERR_INVALID_STATE if the SD FAT filesystem is not mounted
+- */
+-esp_err_t bsp_sdcard_unmount(void);
+-
+-/**
+- * @brief Init IO expander chip TCA9554
+- *
+- * @note If the device was already initialized, users can also use it to get handle.
+- * @note This function will be called in `bsp_display_start()` when using LCD sub-board 2 with the resolution of 480x480.
+- * @note This function will be called in `bsp_audio_init()`.
+- *
+- * @return Pointer to device handle or NULL when error occurred
+- */
+-esp_io_expander_handle_t bsp_io_expander_init(void);
+-
+-/**
+- * @brief Try to initialize the TCA9554 without aborting on an I2C error
+- *
+- * This variant is intended for hardware diagnostics that must report a failed
+- * expander instead of restarting the board. The returned handle remains owned
+- * by the BSP and must not be deleted by the caller.
+- *
+- * @param[out] ret_expander Device handle on success, NULL on failure
+- *
+- * @return
+- *      - ESP_OK on success
+- *      - ESP_ERR_INVALID_ARG when ret_expander is NULL
+- *      - an error returned by the I2C bus or TCA9554 driver
+- */
+-esp_err_t bsp_io_expander_try_init(esp_io_expander_handle_t *ret_expander);
+-
+-
+ /**************************************************************************************************
+  *
+  * LCD interface
+diff --git a/ports/waveshare-1.75/firmware/brookesia/main/CMakeLists.txt b/ports/waveshare-1.75/firmware/brookesia/main/CMakeLists.txt
+index f0062c8..d273b11 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/main/CMakeLists.txt
++++ b/ports/waveshare-1.75/firmware/brookesia/main/CMakeLists.txt
+@@ -4,6 +4,7 @@ idf_component_register(
+         "display_perf_monitor.cpp"
+     INCLUDE_DIRS "."
+     REQUIRES
++        round_wing
+         brookesia_app_calculator
+         bsp_extra
+         ButtonTest
+@@ -95,3 +96,24 @@ spiffs_create_partition_image(
+     FLASH_IN_PROJECT
+     DEPENDS storage_spiffs_stage
+ )
++
++# Generate an explicit first-install image. Ordinary firmware updates do not
++# write this partition, so recordings and imported media are not replaced.
++idf_build_get_property(python PYTHON)
++set(MEDIA_SOURCE_DIR "${CMAKE_BINARY_DIR}/initial_media")
++execute_process(
++    COMMAND "${python}" "${CMAKE_CURRENT_LIST_DIR}/../tools/prepare_internal_media.py"
++        "${MEDIA_SOURCE_DIR}"
++    RESULT_VARIABLE MEDIA_PREPARE_RESULT
++)
++if(NOT MEDIA_PREPARE_RESULT EQUAL 0)
++    message(FATAL_ERROR "Could not prepare 1.75C initial media")
++endif()
++add_custom_target(initial_media_image ALL
++    COMMAND "${CMAKE_COMMAND}" -E rm -f "${CMAKE_BINARY_DIR}/media.bin"
++    COMMAND "${python}" "${CMAKE_CURRENT_LIST_DIR}/../tools/pack_media.py"
++        "${MEDIA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/media.bin"
++    BYPRODUCTS "${CMAKE_BINARY_DIR}/media.bin"
++    COMMENT "Packing 1.75C initial media (not part of normal firmware flash)"
++    VERBATIM
++)
+diff --git a/ports/waveshare-1.75/firmware/brookesia/main/main.cpp b/ports/waveshare-1.75/firmware/brookesia/main/main.cpp
+index fd317f2..d8e6b25 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/main/main.cpp
++++ b/ports/waveshare-1.75/firmware/brookesia/main/main.cpp
+@@ -499,8 +499,7 @@ esp_err_t init_nvs()
+ {
+     esp_err_t result = nvs_flash_init();
+     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+-        ESP_RETURN_ON_ERROR(nvs_flash_erase(), ESP_UTILS_LOG_TAG, "Erase NVS failed");
+-        result = nvs_flash_init();
++        ESP_UTILS_LOGE("NVS initialization failed; preserved without erase: %s", esp_err_to_name(result));
+     }
+     return result;
+ }
+@@ -579,14 +578,14 @@ extern "C" void app_main(void)
+     refresh_boot_loading(boot_loading, "Initializing settings...", 14);
+     ESP_UTILS_CHECK_ERROR_EXIT(init_nvs(), "Initialize NVS failed");
+ 
+-    refresh_boot_loading(boot_loading, "Mounting SD card...", 22);
+-    ESP_UTILS_CHECK_ERROR_EXIT(storage_service_init(), "Initialize SD storage service failed");
++    refresh_boot_loading(boot_loading, "Initializing media storage...", 22);
++    ESP_UTILS_CHECK_ERROR_EXIT(storage_service_init(), "Initialize media storage service failed");
+ 
+     refresh_boot_loading(boot_loading, "Loading chat history...", 28);
+     const esp_err_t chat_history_result = chat_history_init();
+     if (chat_history_result != ESP_OK) {
+         ESP_UTILS_LOGW(
+-            "AIChats SD history unavailable: %s", esp_err_to_name(chat_history_result)
++            "AIChats history unavailable: %s", esp_err_to_name(chat_history_result)
+         );
+     }
+ 
+diff --git a/ports/waveshare-1.75/firmware/brookesia/partitions.csv b/ports/waveshare-1.75/firmware/brookesia/partitions.csv
+index 91a053f..0a881ff 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/partitions.csv
++++ b/ports/waveshare-1.75/firmware/brookesia/partitions.csv
+@@ -7,3 +7,5 @@ phy_init,    data, phy,     0x0010F000,  0x1000,
+ model,       data, spiffs,  0x00110000,  0xF0000,
+ factory,     app,  factory, 0x00200000,  8M,
+ storage,     data, spiffs,  0x00A00000,  6M,
++# New C-board internal user-media filesystem (not compatible with factory map).
++media,       data, fat,    0x01000000, 16M,
+diff --git a/ports/waveshare-1.75/firmware/brookesia/sdkconfig.defaults b/ports/waveshare-1.75/firmware/brookesia/sdkconfig.defaults
+index 065a912..7964efb 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/sdkconfig.defaults
++++ b/ports/waveshare-1.75/firmware/brookesia/sdkconfig.defaults
+@@ -1,7 +1,7 @@
+-# ESP32-S3-Touch-AMOLED-1.75 Brookesia firmware defaults (ESP-IDF 5.5)
++# ESP32-S3-Touch-AMOLED-1.75C Brookesia firmware defaults (ESP-IDF 5.5)
+ CONFIG_IDF_TARGET="esp32s3"
+-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
++CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
++CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+ CONFIG_PARTITION_TABLE_CUSTOM=y
+ 
+ CONFIG_SPIRAM=y
+@@ -18,15 +18,14 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+ # CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+ 
+ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+-# Brookesia installs nine applications and initializes the display/audio BSP
++# Brookesia installs fourteen applications and initializes the display/audio BSP
+ # from app_main. The ESP-IDF default 3584-byte main stack overflows during
+ # CO5300/LVGL bring-up; use the proven Brookesia speaker profile.
+ CONFIG_ESP_MAIN_TASK_STACK_SIZE=20480
+ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+ CONFIG_ESP32S3_DATA_CACHE_64KB=y
+ CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+-CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+-CONFIG_ESP_CONSOLE_UART_BAUDRATE=2000000
++CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+ CONFIG_FREERTOS_HZ=1000
+ CONFIG_VFS_MAX_COUNT=20
+ CONFIG_COMPILER_OPTIMIZATION_PERF=y
+@@ -77,7 +76,7 @@ CONFIG_BOOST_SERIALIZATION_ENABLED=n
+ 
+ # AIChats wake word (WakeNet 9: "Ni Hao Xiao Zhi") and local UI defaults.
+ CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
+-CONFIG_XIAOZHI_APP_UI_LANGUAGE_ENGLISH=y
++CONFIG_XIAOZHI_APP_UI_LANGUAGE_SIMPLIFIED_CHINESE=y
+ CONFIG_XIAOZHI_APP_TRANSPORT_WEBSOCKET=y
+ CONFIG_XIAOZHI_INFO_TIMEOUT_MS=8000
+ 
+@@ -94,12 +93,16 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+ CONFIG_BSP_I2C_CLK_SPEED_HZ=400000
+ CONFIG_BSP_SPIFFS_PARTITION_LABEL="storage"
+ CONFIG_BSP_SPIFFS_MOUNT_POINT="/spiffs"
+-CONFIG_BSP_SD_MOUNT_POINT="/sdcard"
+ 
+-# SD media libraries need normal long UTF-8 filenames.  CP936 keeps Chinese
++# Internal media libraries need normal long UTF-8 filenames.  CP936 keeps Chinese
+ # FAT long names interoperable with Windows while the VFS-facing API is UTF-8.
+ CONFIG_FATFS_LFN_HEAP=y
+ CONFIG_FATFS_MAX_LFN=255
+ CONFIG_FATFS_CODEPAGE_936=y
+ CONFIG_FATFS_API_ENCODING_UTF_8=y
+ CONFIG_FATFS_FS_LOCK=16
++
++# Failed mounts must never destroy settings or user media.
++# CONFIG_BSP_SPIFFS_FORMAT_ON_MOUNT_FAIL is not set
++CONFIG_WL_SECTOR_SIZE_4096=y
++CONFIG_FATFS_SECTOR_4096=y
+diff --git a/ports/waveshare-1.75/firmware/brookesia/tools/generate_sd_test_media.py b/ports/waveshare-1.75/firmware/brookesia/tools/generate_sd_test_media.py
+index 764ce12..0e99381 100644
+--- a/ports/waveshare-1.75/firmware/brookesia/tools/generate_sd_test_media.py
++++ b/ports/waveshare-1.75/firmware/brookesia/tools/generate_sd_test_media.py
+@@ -114,7 +114,7 @@ def draw_test_pattern(size: tuple[int, int], frame: int, total: int) -> Image.Im
+     )
+ 
+     font = ImageFont.load_default()
+-    label = f"Waveshare SD test  {frame + 1:02d}/{total:02d}"
++    label = f"Waveshare media test  {frame + 1:02d}/{total:02d}"
+     draw.rectangle((margin, height - margin - 22, width - margin, height - margin), fill=(0, 0, 0))
+     draw.text((margin + 6, height - margin - 18), label, fill=(255, 255, 255), font=font)
+     return image
