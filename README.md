@@ -14,6 +14,7 @@
 
 ## 使用入口
 
+- [差异清单：硬件、原8应用和使用体验](docs/DIFFERENCES_ZH.md)
 - [构建与媒体说明](docs/BUILD_ZH.md)：执行 `./tools/build-firmware.sh` 进行本地编译。
 - [软硬件兼容性和分区决策](docs/COMPATIBILITY_ZH.md)
 - [已完成验证和待测项目](docs/VALIDATION_ZH.md)
