@@ -8,6 +8,6 @@ Full build: passed in this independent project with ESP-IDF5.5.5.
 Native LVGL9.4 game tests: passed.
 Images/partition/media round-trip/hashes: passed.
 Independent source review and packaging supplement: approved.
-Device operations: none. Hardware acceptance: pending.
+Device operations: authorized full backup, flash and verification completed on2026-09-28. First boot reached desktop ready and installed14apps with no panic/reboot loop during45s capture. Physical interaction/voice/media acceptance remains pending. See DEVICE_INSTALL_ZH.md.
 
 The upstream-to-c-port.patch records firmware adaptations relative to the imported application baseline. Independent project relocation (firmware/ and components/) is documented in SOURCES.md and represented in final CMake files. Unchanged imported sources and generated assets retain their upstream formatting.

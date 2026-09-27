@@ -2,7 +2,7 @@
 
 面向 Waveshare ESP32-S3-Touch-AMOLED-1.75C 的独立工程：保留 ESP-Brookesia 桌面框架，基于官方 1.75 完整应用源码适配 C 板，并整合“圆翼闯关”。这不是 1.75C 旧工厂固件的逐字节复刻。
 
-整机编译、游戏测试、存储测试和独立源码审查已通过。当前版本为0.1.0候选版，尚未烧录或完成真机验证。
+整机编译、游戏测试、存储测试和独立源码审查已通过。0.1.0候选版已按用户授权烧录到实机，镜像校验通过，启动日志确认14个应用加载、桌面就绪。实际触摸、游戏、语音等操作验收仍待完成。
 
 原C工厂8个应用的对应功能全部纳入：Settings、MusicPlayer、Calculator、SquareLine、Gravitysphere（重力球）、SpecAnalyzer、AIChats、DrawPanel。另保留Gallery、VideoPlayer、Recorder、Crosshair、Button Test，并加入Round Wing，共14个应用。界面和实现来自可获取的1.75源码，部分版本与原C工厂不同。
 
@@ -15,6 +15,7 @@
 ## 使用入口
 
 - [差异清单：硬件、原8应用和使用体验](docs/DIFFERENCES_ZH.md)
+- [实机烧录、完整备份与首次启动记录](docs/DEVICE_INSTALL_ZH.md)
 - [构建与媒体说明](docs/BUILD_ZH.md)：执行 `./tools/build-firmware.sh` 进行本地编译。
 - [软硬件兼容性和分区决策](docs/COMPATIBILITY_ZH.md)
 - [已完成验证和待测项目](docs/VALIDATION_ZH.md)
