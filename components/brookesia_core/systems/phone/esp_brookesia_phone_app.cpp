@@ -54,6 +54,10 @@ bool App::setStatusIconState(int state)
 {
     ESP_UTILS_CHECK_FALSE_RETURN(checkInitialized(), false, "base::App is not initialized");
 
+    if (getSystem()->getDisplay().getData().status_bar.data.flags.disable_app_icons) {
+        return true;
+    }
+
     StatusBar *status_bar = getSystem()->getDisplay().getStatusBar();
     ESP_UTILS_CHECK_NULL_RETURN(status_bar, false, "Status bar is invalid");
 

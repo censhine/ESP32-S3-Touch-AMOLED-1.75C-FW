@@ -26,7 +26,7 @@ extern "C" {
 #define CODEC_DEFAULT_ADC_VOLUME            (24.0)
 #define CODEC_DEFAULT_CHANNEL               (2)
 #define CODEC_VOICE_INPUT_CHANNELS          (4)
-#define CODEC_DEFAULT_VOLUME                (80)
+#define CODEC_DEFAULT_VOLUME                (60)
 
 /* ES7210 serializes MIC1, MIC3(reference), MIC2, MIC4 in that order. TDM slot
  * masks and physical microphone masks are deliberately separate namespaces. */

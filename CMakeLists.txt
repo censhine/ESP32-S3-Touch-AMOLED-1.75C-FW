@@ -13,6 +13,14 @@ add_executable(power_button_tests tests/power_button_tests.cpp)
 target_include_directories(power_button_tests PRIVATE firmware/main)
 target_compile_options(power_button_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME power_button COMMAND power_button_tests)
+add_executable(screen_power_tests tests/screen_power_tests.cpp firmware/main/screen_power_control.cpp)
+target_include_directories(screen_power_tests PRIVATE tests/support/screen_power firmware/main)
+target_compile_options(screen_power_tests PRIVATE -Wall -Wextra -Werror)
+foreach(scenario idle_boundary start_setup null_display touch_activity manual_off_on
+        wake_window boot_activity power_activity button_test failed_manual_off
+        failed_wake failed_idle repeated_cycles tick_wrap)
+    add_test(NAME screen_power_${scenario} COMMAND screen_power_tests ${scenario})
+endforeach()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
 
 option(ROUNDWING_BUILD_PREVIEW "Build the native round-screen preview" ON)

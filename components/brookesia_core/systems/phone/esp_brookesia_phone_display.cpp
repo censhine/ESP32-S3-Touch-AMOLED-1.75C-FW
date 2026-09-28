@@ -157,7 +157,7 @@ bool Display::processAppRun(base::App *app)
         ESP_UTILS_LOGD("No status_bar");
     } else {
         // Add status bar icon if needed
-        if (app_data.status_icon_data.icon.image_num > 0) {
+        if (!_data.status_bar.data.flags.disable_app_icons && app_data.status_icon_data.icon.image_num > 0) {
             if (app_data.flags.enable_status_icon_common_size) {
                 ESP_UTILS_LOGD("Use common size for status icon");
                 phone_app->_active_config.status_icon_data.size = _data.status_bar.data.icon_common_size;
@@ -240,7 +240,8 @@ bool Display::processAppClose(base::App *app)
     // Process status bar
     if (_status_bar == nullptr) {
         ESP_UTILS_LOGD("No status_bar");
-    } else if (phone_app->getActiveConfig().status_icon_data.icon.image_num > 0) {
+    } else if (!_data.status_bar.data.flags.disable_app_icons &&
+               phone_app->getActiveConfig().status_icon_data.icon.image_num > 0) {
         // Remove status bar icon if created
         ESP_UTILS_CHECK_FALSE_RETURN(_status_bar->removeIcon(phone_app->getId()), false, "Remove status icon failed");
     }

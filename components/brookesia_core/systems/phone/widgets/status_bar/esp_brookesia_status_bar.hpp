@@ -68,6 +68,7 @@ public:
             uint32_t enable_wifi_icon: 1;
             uint32_t enable_wifi_icon_common_size: 1;
             uint32_t enable_clock: 1;
+            uint32_t disable_app_icons: 1;
         } flags;
     };
 
@@ -112,6 +113,8 @@ public:
     bool setClockFormat(ClockFormat format) const;
     bool setClock(int hour, int min, bool is_pm) const;
     bool setClock(int hour, int min) const;
+    // Display MM-DD HH:mm; month/day zero show an unsynchronized placeholder.
+    bool setClockDateTime(int month, int day, int hour, int min) const;
 
     bool checkVisible(void) const;
 
@@ -169,6 +172,8 @@ private:
     mutable int _clock_hour = -1;
     mutable int _clock_min = -1;
     mutable ClockFormat _clock_format = ClockFormat::FORMAT_24H;
+    mutable bool _clock_date_time_active = false;
+    mutable char _clock_date_time_text[12] = {};
     bool _is_clock_out_of_area = false;
     ESP_Brookesia_LvObj_t _clock_obj;
     ESP_Brookesia_LvObj_t _clock_hour_label;

@@ -29,7 +29,7 @@ static lv_indev_t *disp_indev = NULL;
 static esp_lcd_touch_handle_t tp = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL; // LCD panel handle
 static esp_lcd_panel_io_handle_t io_handle = NULL;
-uint8_t brightness;
+static int brightness_percent_current;
 
 typedef enum {
     BSP_AUDIO_MODE_NONE,
@@ -76,7 +76,8 @@ static const co5300_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x3A, (uint8_t[]){0x55}, 1, 0},
     {0x35, (uint8_t[]){0x00}, 1, 0},
     {0x53, (uint8_t[]){0x20}, 1, 0},
-    {0x51, (uint8_t[]){0xFF}, 1, 0},
+    // Keep startup dark until the application has drawn its first frame.
+    {0x51, (uint8_t[]){0x00}, 1, 0},
     {0x63, (uint8_t[]){0xFF}, 1, 0},
     {0x2A, (uint8_t[]){0x00, 0x06, 0x01, 0xD7}, 4, 0},
     {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xD1}, 4, 600},
@@ -526,13 +527,12 @@ err:
 
 esp_err_t bsp_display_brightness_init(void)
 {
-    bsp_display_brightness_set(100);
-    return ESP_OK;
+    return bsp_display_brightness_set(0);
 }
 
 esp_err_t bsp_display_brightness_set(int brightness_percent)
 {
-    if (panel_handle == NULL)
+    if (panel_handle == NULL || io_handle == NULL)
     {
         ESP_LOGE(TAG, "Panel handle is not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -544,14 +544,18 @@ esp_err_t bsp_display_brightness_set(int brightness_percent)
         return ESP_ERR_INVALID_ARG;
     }
 
-    brightness = (uint8_t)(brightness_percent * 255 / 100);
-
     uint32_t lcd_cmd = 0x51;
     lcd_cmd &= 0xff;
     lcd_cmd <<= 8;
     lcd_cmd |= 0x02 << 24;
-    uint8_t param = brightness;
-    esp_lcd_panel_io_tx_param(io_handle, lcd_cmd, &param, 1);
+    uint8_t param = (uint8_t)((brightness_percent * 255 + 50) / 100);
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_panel_io_tx_param(io_handle, lcd_cmd, &param, 1),
+        TAG, "Set display brightness failed"
+    );
+    // Retain the requested percentage rather than losing a percent when the
+    // quantized 8-bit panel value is converted back for the Settings slider.
+    brightness_percent_current = brightness_percent;
 
     return ESP_OK;
 }
@@ -564,7 +568,7 @@ int bsp_display_brightness_get(void)
         return -1;
     }
 
-    return brightness * 100 / 255;
+    return brightness_percent_current;
 }
 
 esp_err_t bsp_display_backlight_off(void)

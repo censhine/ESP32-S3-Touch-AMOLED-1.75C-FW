@@ -67,7 +67,8 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
 /**
  * @brief Initialize display's brightness
  *
- * Brightness is controlled with PWM signal to a pin controlling backlight.
+ * Initializes AMOLED brightness to zero. Set the desired brightness after
+ * drawing the first complete frame to avoid a bright startup flash.
  *
  * @return
  *      - ESP_OK                On success

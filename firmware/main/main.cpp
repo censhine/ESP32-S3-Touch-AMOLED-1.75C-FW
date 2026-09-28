@@ -5,6 +5,7 @@
  */
 
 #include <ctime>
+#include <cstdlib>
 #include <atomic>
 #include <new>
 
@@ -49,6 +50,7 @@ namespace {
 
 constexpr int ROUND_STATUS_BAR_HEIGHT = 80;
 constexpr int ROUND_STATUS_BAR_CONTENT_INSET = 126;
+constexpr int STARTUP_BRIGHTNESS_PERCENT = 55;
 constexpr uint32_t BROOKESIA_LVGL_TASK_STACK_SIZE = 20 * 1024;
 constexpr uint16_t BROOKESIA_LCD_DRAW_BUFFER_HEIGHT = 12;
 constexpr size_t BROOKESIA_LCD_MAX_TRANSFER_SIZE =
@@ -473,10 +475,12 @@ Stylesheet make_round_display_stylesheet()
     auto &status_bar = stylesheet.display.status_bar.data;
     status_bar.main.size = StyleSize::RECT_W_PERCENT(100, ROUND_STATUS_BAR_HEIGHT);
     status_bar.main.background_color = StyleColor::COLOR(0x1A1A1A);
-    status_bar.main.text_font = StyleFont::SIZE(18);
+    // MM-DD HH:mm fits the left 107 px with Maison Neue 16 (95 px maximum).
+    status_bar.main.text_font = StyleFont::SIZE(16);
     status_bar.flags.enable_main_size_min = 0;
     status_bar.flags.enable_main_size_max = 0;
     status_bar.flags.enable_battery_label = 1;
+    status_bar.flags.disable_app_icons = 1;
     status_bar.icon_common_size = StyleSize::SQUARE(24);
 
     for (int i = 0; i < status_bar.area.num; ++i) {
@@ -515,19 +519,34 @@ void update_status_bar_clock(lv_timer_t *timer)
     time_t now = 0;
     struct tm time_info = {};
     time(&now);
-    localtime_r(&now, &time_info);
+    const bool valid_time = localtime_r(&now, &time_info) != nullptr && time_info.tm_year >= 120;
 
     auto *status_bar = phone->getDisplay().getStatusBar();
     if (status_bar == nullptr) {
         return;
     }
-    status_bar->setClock(time_info.tm_hour, time_info.tm_min);
+    status_bar->setClockDateTime(
+        valid_time ? time_info.tm_mon + 1 : 0,
+        valid_time ? time_info.tm_mday : 0,
+        time_info.tm_hour, time_info.tm_min
+    );
+    static bool valid_time_logged = false;
+    if (valid_time && !valid_time_logged) {
+        ESP_UTILS_LOGI("Status clock synchronized: %02d-%02d %02d:%02d",
+                       time_info.tm_mon + 1, time_info.tm_mday,
+                       time_info.tm_hour, time_info.tm_min);
+        valid_time_logged = true;
+    }
 }
 
 }  // namespace
 
 extern "C" void app_main(void)
 {
+    // Honor any configured timezone; use China time before the first frame
+    // when no timezone has been selected. SNTP reuses the existing service.
+    setenv("TZ", "CST-8", 0);
+    tzset();
     ESP_UTILS_LOGI("Starting ESP32-S3-Touch-AMOLED-1.75 Brookesia firmware");
     esp_lcd_panel_handle_t panel = nullptr;
     lv_indev_t *touch_indev = nullptr;
@@ -564,7 +583,7 @@ extern "C" void app_main(void)
 
     // Give the SPI display one complete frame before revealing the AMOLED.
     vTaskDelay(pdMS_TO_TICKS(50));
-    const esp_err_t backlight_result = bsp_display_backlight_on();
+    const esp_err_t backlight_result = bsp_display_brightness_set(STARTUP_BRIGHTNESS_PERCENT);
     if (backlight_result != ESP_OK) {
         ESP_UTILS_LOGW("Turn display on failed: %s", esp_err_to_name(backlight_result));
     }
@@ -605,6 +624,8 @@ extern "C" void app_main(void)
     if (audio_result != ESP_OK) {
         ESP_UTILS_LOGW("Audio initialization skipped: %s", esp_err_to_name(audio_result));
     }
+    ESP_UTILS_LOGI("Startup settings: brightness=%d%% volume=%d%%",
+                   bsp_display_brightness_get(), bsp_extra_codec_volume_get());
 
     refresh_boot_loading(boot_loading, "Building home screen...", 52);
     Phone *phone = new (std::nothrow) Phone();
@@ -712,7 +733,9 @@ extern "C" void app_main(void)
     refresh_boot_loading(boot_loading, "Starting status services...", 96);
     {
         LvLockGuard gui_guard;
-        lv_timer_create(update_status_bar_clock, 1000, phone);
+        lv_timer_t *clock_timer = lv_timer_create(update_status_bar_clock, 1000, phone);
+        ESP_UTILS_CHECK_NULL_EXIT(clock_timer, "Create status clock timer failed");
+        update_status_bar_clock(clock_timer);
         status_bar = phone->getDisplay().getStatusBar();
 
         // The adapter starts before Brookesia builds its object tree.  Invalidate

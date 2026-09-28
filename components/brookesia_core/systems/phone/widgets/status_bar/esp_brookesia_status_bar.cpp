@@ -5,6 +5,8 @@
  */
 #include <limits>
 #include <memory>
+#include <cstdio>
+#include <cstring>
 #include "esp_brookesia_systems_internal.h"
 #if !ESP_BROOKESIA_PHONE_STATUS_BAR_ENABLE_DEBUG_LOG
 #   define ESP_BROOKESIA_UTILS_DISABLE_DEBUG_LOG
@@ -638,6 +640,7 @@ bool StatusBar::delClock(void)
     _clock_dot_label.reset();
     _clock_min_label.reset();
     _clock_period_label.reset();
+    _clock_date_time_active = false;
 
     return true;
 }
@@ -649,7 +652,9 @@ bool StatusBar::setClockFormat(ClockFormat format) const
 
     switch (format) {
     case ClockFormat::FORMAT_12H:
-        lv_obj_clear_flag(_clock_period_label.get(), LV_OBJ_FLAG_HIDDEN);
+        if (!_clock_date_time_active) {
+            lv_obj_clear_flag(_clock_period_label.get(), LV_OBJ_FLAG_HIDDEN);
+        }
         break;
     case ClockFormat::FORMAT_24H:
         lv_obj_add_flag(_clock_period_label.get(), LV_OBJ_FLAG_HIDDEN);
@@ -668,6 +673,15 @@ bool StatusBar::setClock(int hour, int minute, bool is_pm) const
 {
     ESP_UTILS_LOGD("Set clock(%02d:%02d %s)", hour, minute, is_pm ? "PM" : "AM");
     ESP_UTILS_CHECK_NULL_RETURN(_clock_obj, false, "Invalid clock");
+
+    if (_clock_date_time_active) {
+        _clock_date_time_active = false;
+        _clock_hour = -1;
+        _clock_min = -1;
+        lv_obj_clear_flag(_clock_dot_label.get(), LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(_clock_min_label.get(), LV_OBJ_FLAG_HIDDEN);
+        ESP_UTILS_CHECK_FALSE_RETURN(setClockFormat(_clock_format), false, "Set clock format failed");
+    }
 
     hour = max(min(hour, 23), 0);
     minute = max(min(minute, 59), 0);
@@ -703,6 +717,34 @@ bool StatusBar::setClock(int hour, int minute) const
 
     ESP_UTILS_CHECK_FALSE_RETURN(setClock(hour, minute, is_pm), false, "Set clock failed");
 
+    return true;
+}
+
+bool StatusBar::setClockDateTime(int month, int day, int hour, int minute) const
+{
+    ESP_UTILS_CHECK_NULL_RETURN(_clock_obj, false, "Invalid clock");
+
+    char text[sizeof(_clock_date_time_text)] = "--/-- --:--";
+    if (month != 0 || day != 0) {
+        ESP_UTILS_CHECK_FALSE_RETURN(
+            month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
+            hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59,
+            false, "Invalid clock date or time"
+        );
+        std::snprintf(text, sizeof(text), "%02d-%02d %02d:%02d", month, day, hour, minute);
+    }
+    if (_clock_date_time_active && std::strcmp(text, _clock_date_time_text) == 0) {
+        return true;
+    }
+
+    // Reuse the existing hour label and a lifetime-stable buffer. The 1 s
+    // status timer causes no text allocation or invalidation within a minute.
+    std::memcpy(_clock_date_time_text, text, sizeof(text));
+    _clock_date_time_active = true;
+    lv_obj_add_flag(_clock_dot_label.get(), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_clock_min_label.get(), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_clock_period_label.get(), LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text_static(_clock_hour_label.get(), _clock_date_time_text);
     return true;
 }
 

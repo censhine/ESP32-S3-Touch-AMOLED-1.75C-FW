@@ -79,6 +79,9 @@ CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
 CONFIG_XIAOZHI_APP_UI_LANGUAGE_SIMPLIFIED_CHINESE=y
 CONFIG_XIAOZHI_APP_TRANSPORT_WEBSOCKET=y
 CONFIG_XIAOZHI_INFO_TIMEOUT_MS=8000
+# SNTP stores UTC; localtime applies CST-8. The alternate server path adds
+# timezone_offset to the UTC timestamp and would shift the status clock twice.
+# CONFIG_XIAOZHI_SYNC_SYSTEM_TIME_FROM_SERVER is not set
 
 # The connected TLS session otherwise consumes the internal heap needed by
 # Xiaozhi's 24 KB prompt stack and microphone task. Use the board's 8 MB PSRAM
