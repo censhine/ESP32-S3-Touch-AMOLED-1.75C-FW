@@ -21,6 +21,17 @@ foreach(scenario idle_boundary start_setup null_display touch_activity manual_of
         failed_wake failed_idle repeated_cycles tick_wrap)
     add_test(NAME screen_power_${scenario} COMMAND screen_power_tests ${scenario})
 endforeach()
+set(XIAOZHI_TIME_PRIVATE_DIR
+    firmware/components/esp_xiaozhi_safe/esp_xiaozhi/src/priv_include)
+set(XIAOZHI_CJSON_DIR firmware/managed_components/espressif__cjson/cJSON)
+add_executable(xiaozhi_server_time_tests
+    tests/xiaozhi_server_time_tests.cpp
+    ${XIAOZHI_CJSON_DIR}/cJSON.c)
+target_include_directories(xiaozhi_server_time_tests PRIVATE
+    ${XIAOZHI_TIME_PRIVATE_DIR} ${XIAOZHI_CJSON_DIR})
+target_compile_options(xiaozhi_server_time_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME xiaozhi_server_time COMMAND xiaozhi_server_time_tests)
+
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts")
 
 option(ROUNDWING_BUILD_PREVIEW "Build the native round-screen preview" ON)

@@ -37,11 +37,19 @@ namespace esp_brookesia::apps
 
     static void time_sync_notification_cb(struct timeval *tv)
     {
-        (void)tv;
         setenv("TZ", "CST-8", 1);
         tzset();
         s_time_synced = true;
-        ESP_UTILS_LOGI("SNTP time synced, timezone CST-8 applied");
+        const time_t utc = tv ? tv->tv_sec : time(nullptr);
+        struct tm beijing = {};
+        localtime_r(&utc, &beijing);
+        ESP_UTILS_LOGI(
+            "SNTP time synced from ntp.aliyun.com: UTC epoch=%lld; "
+            "Beijing UTC+8=%04d-%02d-%02d %02d:%02d:%02d",
+            static_cast<long long>(utc), beijing.tm_year + 1900,
+            beijing.tm_mon + 1, beijing.tm_mday,
+            beijing.tm_hour, beijing.tm_min, beijing.tm_sec
+        );
     }
 
     static void start_time_sync_once()
