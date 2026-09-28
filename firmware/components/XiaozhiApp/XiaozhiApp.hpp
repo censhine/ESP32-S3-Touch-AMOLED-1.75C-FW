@@ -187,6 +187,39 @@ private:
     std::atomic<uint32_t> _pcm_mean_abs{0};
     std::atomic<uint32_t> _input_pcm_peak{0};
     std::atomic<uint32_t> _input_pcm_mean_abs{0};
+    // Counts are cumulative; maxima are exchanged by the control task every
+    // two seconds. Keep every shared diagnostic value 32-bit on ESP32-S3.
+    struct AudioDiagnostics {
+        std::atomic<uint32_t> received{0};
+        std::atomic<uint32_t> enqueued{0};
+        std::atomic<uint32_t> queue_full{0};
+        std::atomic<uint32_t> lock_timeout{0};
+        std::atomic<uint32_t> rejected{0};
+        std::atomic<uint32_t> queue_high_water{0};
+        std::atomic<uint32_t> interarrival_max_us{0};
+        std::atomic<uint32_t> rx_turn{0};
+        std::atomic<uint32_t> rx_last_us{0};
+        std::atomic<uint32_t> sample_rate{0};
+        std::atomic<uint32_t> frame_ms{0};
+        std::atomic<uint32_t> decoded{0};
+        std::atomic<uint32_t> decode_errors{0};
+        std::atomic<uint32_t> decode_max_us{0};
+        std::atomic<uint32_t> decode_work_max_us{0};
+        std::atomic<uint32_t> decode_with_lock_max_us{0};
+        std::atomic<uint32_t> decode_lock_wait_max_us{0};
+        std::atomic<uint32_t> written{0};
+        std::atomic<uint32_t> write_errors{0};
+        std::atomic<uint32_t> write_max_us{0};
+        std::atomic<uint32_t> write_idle_max_us{0};
+        std::atomic<uint32_t> pcm_peak{0};
+        std::atomic<uint32_t> pcm_near_full{0};
+        std::atomic<uint32_t> pcm_samples{0};
+        std::atomic<uint32_t> written_samples{0};
+        std::atomic<uint32_t> empty_waits{0};
+        std::atomic<uint32_t> empty_wait_us{0};
+        std::atomic<uint32_t> empty_wait_max_us{0};
+    } _audio_diag;
+
     std::atomic<bool> _accept_playback{false};
     std::atomic<bool> _tts_stop_pending{false};
     std::atomic<bool> _playback_busy{false};
@@ -281,6 +314,7 @@ private:
     void inputAudio();
     void encodeAudio();
     void playAudio();
+    void logAudioDiagnostics();
 
     static const char *stateText(State state);
     static bool tickReached(TickType_t now, TickType_t target);

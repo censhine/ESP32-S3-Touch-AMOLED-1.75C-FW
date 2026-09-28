@@ -25,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
+#include "esp_timer.h"
 #include "esp_xiaozhi_info.h"
 #include "freertos/idf_additions.h"
 #include "sdkconfig.h"
@@ -48,6 +49,7 @@ constexpr uint32_t CHAT_SAMPLE_RATE = 16000;
 constexpr uint32_t DEVICE_AUDIO_SAMPLE_RATE = 24000;
 constexpr uint32_t CHAT_FRAME_DURATION_MS = 60;
 constexpr uint32_t PLAYBACK_DRAIN_MS = 200;
+constexpr uint32_t AUDIO_DIAG_INTERVAL_MS = 2000;
 constexpr uint32_t PREROLL_QUEUE_TIMEOUT_MS = 5000;
 constexpr uint32_t PREROLL_ENCODE_TIMEOUT_MS = 15000;
 constexpr uint32_t UPLINK_FIRST_PACKET_TIMEOUT_MS = 3000;
@@ -57,6 +59,22 @@ constexpr uint32_t PLAYBACK_IDLE_WAIT_MS = 1000;
 constexpr size_t CONTROL_QUEUE_LENGTH = 24;
 constexpr size_t PCM_QUEUE_LENGTH = 40;
 constexpr size_t PLAYBACK_QUEUE_LENGTH = 10;
+
+// Modulo-32-bit microseconds are sufficient for intervals within one turn;
+// no 64-bit shared atomics (and no libatomic dependency) are needed.
+uint32_t audioDiagNowUs()
+{
+    return static_cast<uint32_t>(esp_timer_get_time());
+}
+
+void audioDiagMax(std::atomic<uint32_t> &maximum, uint32_t value)
+{
+    uint32_t previous = maximum.load(std::memory_order_relaxed);
+    while (value > previous && !maximum.compare_exchange_weak(
+               previous, value, std::memory_order_relaxed)) {
+    }
+}
+
 constexpr size_t DEVICE_TDM_CHANNELS = CODEC_VOICE_INPUT_CHANNELS;
 constexpr size_t DEVICE_MIC1_SLOT = 0;
 constexpr size_t DEVICE_ECHO_SLOT = 1;
@@ -914,6 +932,7 @@ bool XiaozhiApp::postControlEvent(const ControlEvent &event, bool wait_for_ack)
 void XiaozhiApp::controlLoop()
 {
     bool exit_requested = false;
+    TickType_t last_audio_diag_tick = xTaskGetTickCount();
     while (!exit_requested) {
         ControlEvent event = {};
         if (xQueueReceive(_control_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -940,6 +959,12 @@ void XiaozhiApp::controlLoop()
                 }
             }
             prepareIfDue();
+            TickType_t diag_now = xTaskGetTickCount();
+            if (diag_now - last_audio_diag_tick >=
+                    pdMS_TO_TICKS(AUDIO_DIAG_INTERVAL_MS)) {
+                last_audio_diag_tick = diag_now;
+                logAudioDiagnostics();
+            }
             TickType_t uplink_started = _uplink_started_tick.load();
             if (uplink_started != 0 &&
                     _state.load() == State::Listening &&
@@ -1553,17 +1578,31 @@ bool XiaozhiApp::prepareChat()
             return;
         }
         ScopedOptionalCounter async_user(&_async_post_users);
+        _audio_diag.received.fetch_add(1, std::memory_order_relaxed);
         if (_chat_generation.load() != client_generation ||
                 !data || len == 0 || len > sizeof(AudioPacket::data) ||
                 !_playback_queue || !_audio_tasks_running.load() ||
                 !_accept_playback.load() ||
                 _channel_state.load() != ChannelState::Open ||
                 _shutdown.load()) {
+            _audio_diag.rejected.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
         AudioPacket packet = {};
         packet.turn_generation = _turn_generation.load();
+        const uint32_t arrival_us = audioDiagNowUs();
+        const uint32_t previous_turn = _audio_diag.rx_turn.exchange(
+            packet.turn_generation, std::memory_order_relaxed
+        );
+        const uint32_t previous_arrival_us = _audio_diag.rx_last_us.exchange(
+            arrival_us, std::memory_order_relaxed
+        );
+        if (previous_turn == packet.turn_generation && previous_arrival_us != 0) {
+            audioDiagMax(
+                _audio_diag.interarrival_max_us, arrival_us - previous_arrival_us
+            );
+        }
         packet.timestamp = timestamp;
         packet.sample_rate = static_cast<uint16_t>(
             sample_rate > 0 && sample_rate <= UINT16_MAX ?
@@ -1574,6 +1613,8 @@ bool XiaozhiApp::prepareChat()
             frame_duration_ms : CHAT_FRAME_DURATION_MS
         );
         packet.size = static_cast<uint16_t>(len);
+        _audio_diag.sample_rate.store(packet.sample_rate, std::memory_order_relaxed);
+        _audio_diag.frame_ms.store(packet.frame_duration_ms, std::memory_order_relaxed);
         memcpy(packet.data, data, len);
 
         if (!_playback_mutex ||
@@ -1581,14 +1622,25 @@ bool XiaozhiApp::prepareChat()
                     _playback_mutex,
                     pdMS_TO_TICKS(CONTROL_EVENT_POST_TIMEOUT_MS)
                 ) != pdTRUE) {
+            _audio_diag.lock_timeout.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         if (_accept_playback.load() &&
                 _chat_generation.load() == client_generation &&
                 packet.turn_generation == _turn_generation.load() &&
-                _channel_state.load() == ChannelState::Open &&
-                xQueueSend(_playback_queue, &packet, 0) == pdTRUE) {
-            _last_audio_packet_tick.store(xTaskGetTickCount());
+                _channel_state.load() == ChannelState::Open) {
+            if (xQueueSend(_playback_queue, &packet, 0) == pdTRUE) {
+                _last_audio_packet_tick.store(xTaskGetTickCount());
+                _audio_diag.enqueued.fetch_add(1, std::memory_order_relaxed);
+                audioDiagMax(
+                    _audio_diag.queue_high_water,
+                    static_cast<uint32_t>(uxQueueMessagesWaiting(_playback_queue))
+                );
+            } else {
+                _audio_diag.queue_full.fetch_add(1, std::memory_order_relaxed);
+            }
+        } else {
+            _audio_diag.rejected.fetch_add(1, std::memory_order_relaxed);
         }
         xSemaphoreGive(_playback_mutex);
     };
@@ -3005,11 +3057,33 @@ void XiaozhiApp::playAudio()
     }
 
     uint32_t decode_failures = 0;
+    uint32_t diag_turn = _turn_generation.load();
+    uint32_t last_write_end_us = 0;
     AudioPacket packet = {};
     while (server_pcm && device_pcm && stereo &&
             _audio_tasks_running.load()) {
-        if (!_playback_queue ||
-                xQueuePeek(_playback_queue, &packet, pdMS_TO_TICKS(50)) != pdTRUE) {
+        const uint32_t current_turn = _turn_generation.load();
+        if (diag_turn != current_turn) {
+            diag_turn = current_turn;
+            last_write_end_us = 0;
+        }
+        // Count waits while TTS is active, excluding the intentional silence
+        // after TTS-stop while the control task waits for playback to drain.
+        const bool measure_empty_wait = _playback_queue &&
+            _state.load() == State::Speaking && !_tts_stop_pending.load() &&
+            _accept_playback.load() &&
+            uxQueueMessagesWaiting(_playback_queue) == 0;
+        const uint32_t wait_start_us = measure_empty_wait ? audioDiagNowUs() : 0;
+        const bool packet_available = _playback_queue &&
+            xQueuePeek(_playback_queue, &packet, pdMS_TO_TICKS(50)) == pdTRUE;
+        if (measure_empty_wait && current_turn == _turn_generation.load() &&
+                _state.load() == State::Speaking && !_tts_stop_pending.load()) {
+            const uint32_t waited_us = audioDiagNowUs() - wait_start_us;
+            _audio_diag.empty_waits.fetch_add(1, std::memory_order_relaxed);
+            _audio_diag.empty_wait_us.fetch_add(waited_us, std::memory_order_relaxed);
+            audioDiagMax(_audio_diag.empty_wait_max_us, waited_us);
+        }
+        if (!packet_available) {
             checkPlaybackDrained();
             continue;
         }
@@ -3023,8 +3097,14 @@ void XiaozhiApp::playAudio()
         bool output_error = false;
         size_t playback_samples = 0;
         const int16_t *playback_pcm = nullptr;
+        const uint32_t decode_lock_start_us = audioDiagNowUs();
         if (_playback_mutex &&
                 xSemaphoreTake(_playback_mutex, portMAX_DELAY) == pdTRUE) {
+            const uint32_t decode_work_start_us = audioDiagNowUs();
+            audioDiagMax(
+                _audio_diag.decode_lock_wait_max_us,
+                decode_work_start_us - decode_lock_start_us
+            );
             received =
                 xQueueReceive(_playback_queue, &packet, 0) == pdTRUE;
             if (received) {
@@ -3045,13 +3125,18 @@ void XiaozhiApp::playAudio()
                     output.buffer = reinterpret_cast<uint8_t *>(server_pcm);
                     output.len = MAX_SERVER_PCM_BYTES;
                     esp_audio_dec_info_t info = {};
+                    const uint32_t decode_start_us = audioDiagNowUs();
                     bool opus_ok =
                         esp_opus_dec_decode(
                             _opus_decoder, &input, &output, &info
                         ) == ESP_AUDIO_ERR_OK &&
                         output.decoded_size > 0 &&
                         output.decoded_size <= MAX_SERVER_PCM_BYTES;
+                    audioDiagMax(
+                        _audio_diag.decode_max_us, audioDiagNowUs() - decode_start_us
+                    );
                     if (opus_ok) {
+                        _audio_diag.decoded.fetch_add(1, std::memory_order_relaxed);
                         uint32_t server_samples =
                             output.decoded_size / sizeof(int16_t);
                         if (_output_resampler) {
@@ -3094,10 +3179,23 @@ void XiaozhiApp::playAudio()
                         } else {
                             output_error = true;
                         }
+                    } else {
+                        _audio_diag.decode_errors.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
+            const uint32_t decode_work_end_us = audioDiagNowUs();
             xSemaphoreGive(_playback_mutex);
+            if (received) {
+                audioDiagMax(
+                    _audio_diag.decode_work_max_us,
+                    decode_work_end_us - decode_work_start_us
+                );
+                audioDiagMax(
+                    _audio_diag.decode_with_lock_max_us,
+                    decode_work_end_us - decode_lock_start_us
+                );
+            }
         }
         if (!received) {
             checkPlaybackDrained();
@@ -3126,19 +3224,48 @@ void XiaozhiApp::playAudio()
             }
         } else if (decoded && _accept_playback.load() &&
                 packet.turn_generation == _turn_generation.load()) {
+            uint32_t pcm_peak = 0;
+            uint32_t pcm_near_full = 0;
             for (size_t i = 0; i < playback_samples; ++i) {
                 stereo[i * 2] = playback_pcm[i];
                 stereo[i * 2 + 1] = playback_pcm[i];
+                const int32_t sample = playback_pcm[i];
+                const uint32_t magnitude = static_cast<uint32_t>(
+                    sample < 0 ? -sample : sample
+                );
+                pcm_peak = magnitude > pcm_peak ? magnitude : pcm_peak;
+                // Count mono samples once, before duplicating to both I2S slots.
+                pcm_near_full += magnitude >= 32700 ? 1U : 0U;
             }
+            audioDiagMax(_audio_diag.pcm_peak, pcm_peak);
+            _audio_diag.pcm_near_full.fetch_add(pcm_near_full, std::memory_order_relaxed);
+            _audio_diag.pcm_samples.fetch_add(
+                static_cast<uint32_t>(playback_samples), std::memory_order_relaxed
+            );
             size_t written = 0;
             size_t write_size =
                 playback_samples * 2 * sizeof(int16_t);
+            if (diag_turn != packet.turn_generation) {
+                diag_turn = packet.turn_generation;
+                last_write_end_us = 0;
+            }
+            const uint32_t write_start_us = audioDiagNowUs();
+            const uint32_t write_idle_us = last_write_end_us != 0 ?
+                write_start_us - last_write_end_us : 0;
             esp_err_t write_ret = bsp_extra_i2s_write(
                 stereo, write_size, &written, 200
             );
+            last_write_end_us = audioDiagNowUs();
+            audioDiagMax(_audio_diag.write_max_us, last_write_end_us - write_start_us);
+            audioDiagMax(_audio_diag.write_idle_max_us, write_idle_us);
             if (write_ret == ESP_OK && written == write_size) {
                 _last_audio_write_tick.store(xTaskGetTickCount());
+                _audio_diag.written.fetch_add(1, std::memory_order_relaxed);
+                _audio_diag.written_samples.fetch_add(
+                    static_cast<uint32_t>(playback_samples), std::memory_order_relaxed
+                );
             } else {
+                _audio_diag.write_errors.fetch_add(1, std::memory_order_relaxed);
                 _accept_playback.store(false);
                 ControlEvent event = {};
                 event.type = ControlEventType::AudioError;
@@ -3158,6 +3285,45 @@ void XiaozhiApp::playAudio()
     _playback_busy.store(false);
     _playback_task_running.store(false);
     vTaskDeleteWithCaps(nullptr);
+}
+
+void XiaozhiApp::logAudioDiagnostics()
+{
+    auto count = [](const std::atomic<uint32_t> &value) {
+        return static_cast<unsigned long>(value.load(std::memory_order_relaxed));
+    };
+    auto interval_max = [](std::atomic<uint32_t> &value) {
+        return static_cast<unsigned long>(value.exchange(0, std::memory_order_relaxed));
+    };
+    const unsigned int depth = _playback_queue ?
+        static_cast<unsigned int>(uxQueueMessagesWaiting(_playback_queue)) : 0;
+    // Approximate concurrent snapshots: cumulative counters can advance while
+    // this line is assembled; each maximum covers the preceding log interval.
+    ESP_UTILS_LOGI(
+        "AudioDiag turn=%lu rate=%lu frame_ms=%lu q=%u q_hwm=%lu "
+        "received=%lu enqueued=%lu queue_full=%lu lock_timeout=%lu rejected=%lu "
+        "arrival_max_us=%lu decoded=%lu decode_err=%lu "
+        "decode_max_us=%lu work_max_us=%lu work_lock_max_us=%lu lock_max_us=%lu "
+        "written=%lu write_err=%lu write_max_us=%lu write_idle_max_us=%lu "
+        "pcm_peak=%lu near_full=%lu pcm_samples=%lu written_samples=%lu "
+        "empty_waits=%lu empty_wait_us=%lu empty_max_us=%lu",
+        static_cast<unsigned long>(_turn_generation.load()),
+        count(_audio_diag.sample_rate), count(_audio_diag.frame_ms), depth,
+        interval_max(_audio_diag.queue_high_water),
+        count(_audio_diag.received), count(_audio_diag.enqueued),
+        count(_audio_diag.queue_full), count(_audio_diag.lock_timeout),
+        count(_audio_diag.rejected), interval_max(_audio_diag.interarrival_max_us),
+        count(_audio_diag.decoded), count(_audio_diag.decode_errors),
+        interval_max(_audio_diag.decode_max_us), interval_max(_audio_diag.decode_work_max_us),
+        interval_max(_audio_diag.decode_with_lock_max_us),
+        interval_max(_audio_diag.decode_lock_wait_max_us),
+        count(_audio_diag.written), count(_audio_diag.write_errors),
+        interval_max(_audio_diag.write_max_us), interval_max(_audio_diag.write_idle_max_us),
+        interval_max(_audio_diag.pcm_peak), count(_audio_diag.pcm_near_full),
+        count(_audio_diag.pcm_samples), count(_audio_diag.written_samples),
+        count(_audio_diag.empty_waits), count(_audio_diag.empty_wait_us),
+        interval_max(_audio_diag.empty_wait_max_us)
+    );
 }
 
 const char *XiaozhiApp::stateText(State state)
