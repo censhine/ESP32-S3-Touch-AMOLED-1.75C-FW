@@ -532,7 +532,7 @@ void update_status_bar_clock(lv_timer_t *timer)
     );
     static bool valid_time_logged = false;
     if (valid_time && !valid_time_logged) {
-        ESP_UTILS_LOGI("Status clock synchronized: %02d-%02d %02d:%02d",
+        ESP_UTILS_LOGI("Status clock displayed (Beijing UTC+8): %02d-%02d %02d:%02d",
                        time_info.tm_mon + 1, time_info.tm_mday,
                        time_info.tm_hour, time_info.tm_min);
         valid_time_logged = true;
@@ -543,9 +543,9 @@ void update_status_bar_clock(lv_timer_t *timer)
 
 extern "C" void app_main(void)
 {
-    // Honor any configured timezone; use China time before the first frame
-    // when no timezone has been selected. SNTP reuses the existing service.
-    setenv("TZ", "CST-8", 0);
+    // Keep the system clock in UTC and apply Beijing time only for display.
+    // POSIX TZ offsets have the opposite sign: CST-8 means UTC+8.
+    setenv("TZ", "CST-8", 1);
     tzset();
     ESP_UTILS_LOGI("Starting ESP32-S3-Touch-AMOLED-1.75 Brookesia firmware");
     esp_lcd_panel_handle_t panel = nullptr;

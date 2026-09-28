@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -24,6 +25,7 @@
 #include "esp_xiaozhi_keystore.h"
 #include "esp_xiaozhi_board.h"
 #include "esp_xiaozhi_info.h"
+#include "esp_xiaozhi_server_time.h"
 
 static const char *TAG = "ESP_XIAOZHI_INFO";
 
@@ -338,19 +340,13 @@ static esp_err_t esp_xiaozhi_chat_http_data_handler(const char *data, size_t dat
 
         cJSON *server_time = cJSON_GetObjectItem(root, "server_time");
         if (cJSON_IsObject(server_time)) {
-            cJSON *timestamp = cJSON_GetObjectItem(server_time, "timestamp");
-            if (cJSON_IsNumber(timestamp)) {
+            struct timeval tv;
+            if (esp_xiaozhi_server_time_parse(server_time, &tv)) {
 #if CONFIG_XIAOZHI_SYNC_SYSTEM_TIME_FROM_SERVER
-                struct timeval tv;
-                double ts = timestamp->valuedouble;
-                cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
-                if (cJSON_IsNumber(timezone_offset)) {
-                    ts += (timezone_offset->valueint * 60 * 1000);
+                if (settimeofday(&tv, NULL) != 0) {
+                    const int time_error = errno;
+                    ESP_LOGW(TAG, "Failed to synchronize server UTC time (errno=%d)", time_error);
                 }
-
-                tv.tv_sec = (time_t)(ts / 1000);
-                tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;
-                settimeofday(&tv, NULL);
 #endif
                 info->has_server_time = true;
             }
