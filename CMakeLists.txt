@@ -54,4 +54,35 @@ if(ROUNDWING_BUILD_PREVIEW)
     target_link_libraries(wifi_keyboard_tests PRIVATE wifi_password_keyboard)
     target_compile_options(wifi_keyboard_tests PRIVATE -Wall -Wextra -Werror)
     add_test(NAME wifi_keyboard_interaction COMMAND wifi_keyboard_tests)
+
+    set(XIAOZHI_UI_DIR firmware/components/XiaozhiApp)
+    set(XIAOZHI_FONT_DIR firmware/managed_components/78__xiaozhi-fonts)
+    add_library(xiaozhi_cat_avatar
+        ${XIAOZHI_UI_DIR}/XiaozhiCatAvatar.cpp
+        ${XIAOZHI_UI_DIR}/assets/cat_avatar_assets.c)
+    target_include_directories(xiaozhi_cat_avatar PUBLIC ${XIAOZHI_UI_DIR})
+    target_link_libraries(xiaozhi_cat_avatar PUBLIC lvgl)
+    target_compile_options(xiaozhi_cat_avatar PRIVATE -Wall -Wextra -Werror)
+    add_executable(xiaozhi_cat_tests tests/xiaozhi_cat_tests.cpp)
+    target_link_libraries(xiaozhi_cat_tests PRIVATE xiaozhi_cat_avatar)
+    target_compile_options(xiaozhi_cat_tests PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME xiaozhi_cat_avatar COMMAND xiaozhi_cat_tests)
+
+    # The device's complete Chinese font uses 32-bit pointers in its binary
+    # resource. Native rendering uses the same 30px glyph set as C source.
+    add_library(xiaozhi_ui_native
+        ${XIAOZHI_UI_DIR}/XiaozhiUi.cpp
+        ${XIAOZHI_UI_DIR}/XiaozhiSubtitlePager.cpp
+        ${XIAOZHI_FONT_DIR}/src/font_puhui_30_4.c
+        ${XIAOZHI_FONT_DIR}/src/font_awesome_30_4.c)
+    target_include_directories(xiaozhi_ui_native PRIVATE
+        tests/support/xiaozhi ${XIAOZHI_FONT_DIR}/include)
+    target_compile_definitions(xiaozhi_ui_native PUBLIC
+        font_puhui_basic_30_4=font_puhui_30_4)
+    target_link_libraries(xiaozhi_ui_native PUBLIC xiaozhi_cat_avatar)
+    target_compile_options(xiaozhi_ui_native PRIVATE -Wall -Wextra -Werror)
+    add_executable(xiaozhi_ui_tests tests/xiaozhi_ui_tests.cpp)
+    target_link_libraries(xiaozhi_ui_tests PRIVATE xiaozhi_ui_native)
+    target_compile_options(xiaozhi_ui_tests PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME xiaozhi_round_ui COMMAND xiaozhi_ui_tests)
 endif()

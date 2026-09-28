@@ -2,6 +2,7 @@ set(PROJ_SRC ${CMAKE_CURRENT_LIST_DIR})
 
 set(PROJ_SRCS_C
     "assets/img_app_xiaozhi.c"
+    "assets/cat_avatar_assets.c"
 )
 
 set(PROJ_SRCS_CPP
@@ -9,9 +10,11 @@ set(PROJ_SRCS_CPP
     "XiaozhiActivationPrompt.cpp"
     "XiaozhiApp.cpp"
     "XiaozhiAudioProcessor.cpp"
+    "XiaozhiCatAvatar.cpp"
     "XiaozhiClient.cpp"
     "XiaozhiDeveloperTools.cpp"
     "XiaozhiLocalization.cpp"
+    "XiaozhiSubtitlePager.cpp"
     "XiaozhiUi.cpp"
 )
 

@@ -539,6 +539,9 @@ bool XiaozhiApp::deinit()
 bool XiaozhiApp::pause()
 {
     _visible.store(false);
+    if (_ui) {
+        _ui->setPaused(true);
+    }
     if (_activation_prompt) {
         _activation_prompt->cancel();
     }
@@ -563,6 +566,9 @@ bool XiaozhiApp::resume()
         createUi();
     }
     _visible.store(true);
+    if (_ui) {
+        _ui->setPaused(false);
+    }
     if (_ui_timer) {
         lv_timer_resume(_ui_timer);
     }
@@ -582,7 +588,7 @@ void XiaozhiApp::createUi()
 
     lv_obj_t *screen = lv_screen_active();
     lv_obj_clean(screen);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFF9ED), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -590,12 +596,11 @@ void XiaozhiApp::createUi()
     lv_obj_remove_style_all(_page_root);
     lv_obj_set_size(_page_root, lv_pct(100), lv_pct(100));
     lv_obj_center(_page_root);
-    lv_obj_set_style_bg_color(_page_root, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_page_root, lv_color_hex(0xFFF9ED), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(_page_root, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_clear_flag(_page_root, LV_OBJ_FLAG_SCROLLABLE);
 
-    // The 466 x 466 AMOLED needs wrapped subtitles; a scrolling single line
-    // hides most server replies and is hard to read on the round viewport.
+    // Keep complete subtitle pages inside the round viewport.
     if (!_ui->create(_page_root, uiActionCallback, this, true)) {
         destroyUi();
         return;
@@ -641,6 +646,28 @@ void XiaozhiApp::refreshUi()
     xSemaphoreGive(_state_mutex);
 
     State state = _state.load();
+    XiaozhiCatActivity activity = XiaozhiCatActivity::Idle;
+    switch (state) {
+    case State::Listening:
+        activity = XiaozhiCatActivity::Listening;
+        break;
+    case State::Processing:
+    case State::Connecting:
+    case State::Preparing:
+        activity = XiaozhiCatActivity::Thinking;
+        break;
+    case State::Speaking:
+        activity = XiaozhiCatActivity::Speaking;
+        break;
+    case State::Error:
+    case State::NetworkRequired:
+        activity = XiaozhiCatActivity::Error;
+        break;
+    case State::Ready:
+    case State::ActivationRequired:
+        break;
+    }
+    _ui->setActivity(activity);
     _ui->setNetworkReady(_network_ready.load());
     _ui->setStatus(stateText(state));
     _ui->setChatMessage(role, text);
