@@ -171,6 +171,7 @@ private:
 
     // Core
     lv_indev_t *_touch_device = nullptr;
+    bool _touch_input_blocked = false;
 
     struct {
         std::array<bool, static_cast<int>(Gesture::IndicatorBarType::MAX)>  is_indicator_bar_scale_back_anim_running;

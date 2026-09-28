@@ -102,6 +102,8 @@ bool Manager::begin(void)
     }
 
     if (gesture != nullptr) {
+        lv_obj_add_event_cb(gesture->getEventObj(), onGestureCancelEventCallback,
+                            LV_EVENT_CANCEL, this);
         // App Launcher
         lv_obj_add_event_cb(gesture->getEventObj(), onAppLauncherGestureEventCallback,
                             gesture->getPressingEventCode(), this);
@@ -639,6 +641,45 @@ bool Manager::processNavigationEvent(base::Manager::NavigateType type)
 
 end:
     return ret;
+}
+
+void Manager::onGestureCancelEventCallback(lv_event_t *event)
+{
+    ESP_UTILS_CHECK_NULL_EXIT(event, "Invalid event");
+    auto *manager = static_cast<Manager *>(lv_event_get_user_data(event));
+    ESP_UTILS_CHECK_NULL_EXIT(manager, "Invalid manager");
+
+    const bool restore_snapshot = manager->_flags.is_recents_screen_pressed &&
+                                  manager->_flags.is_recents_screen_snapshot_move_ver;
+
+    manager->_app_launcher_gesture_dir = Gesture::DIR_NONE;
+    manager->_navigation_bar_gesture_dir = Gesture::DIR_NONE;
+    manager->_flags.is_app_launcher_gesture_disabled = false;
+    manager->_flags.is_navigation_bar_gesture_disabled = false;
+    manager->_flags.is_gesture_navigation_disabled = false;
+    manager->_flags.is_recents_screen_pressed = false;
+    manager->_flags.is_recents_screen_snapshot_move_hor = false;
+    manager->_flags.is_recents_screen_snapshot_move_ver = false;
+    manager->_recents_screen_start_point = {};
+    manager->_recents_screen_last_point = {};
+
+    // Restore a cancelled drag without invoking the release path, which can
+    // navigate, launch an app, or close the dragged app. The original touch
+    // point may no longer hit the moved card, so restore existing snapshots.
+    auto *recents_screen = manager->display.getRecentsScreen();
+    if (restore_snapshot && recents_screen != nullptr) {
+        for (int i = 0; i < manager->getRunningAppCount(); ++i) {
+            const auto *app = manager->getRunningAppByIdenx(i);
+            if (app == nullptr || !recents_screen->checkSnapshotExist(app->getId())) {
+                continue;
+            }
+            const int app_id = app->getId();
+            ESP_UTILS_CHECK_FALSE_EXIT(
+                recents_screen->moveSnapshotY(app_id, recents_screen->getSnapshotOriginY(app_id)),
+                "Restore cancelled snapshot drag failed"
+            );
+        }
+    }
 }
 
 void Manager::onGestureNavigationPressingEventCallback(lv_event_t *event)

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "display_perf_monitor.cpp"
+        "screen_power_control.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         round_wing

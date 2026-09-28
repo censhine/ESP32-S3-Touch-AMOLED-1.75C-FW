@@ -31,6 +31,7 @@
 #include "chat_history.h"
 #include "display_perf_monitor.hpp"
 #include "esp_brookesia_app_calculator.hpp"
+#include "screen_power_control.hpp"
 #include "storage_service.h"
 #include "system_status.hpp"
 
@@ -383,7 +384,7 @@ void round_display_flush_area(lv_event_t *event)
     area->y2 = ((area->y2 >> 1) << 1) + 1;
 }
 
-lv_display_t *start_brookesia_display()
+lv_display_t *start_brookesia_display(esp_lcd_panel_handle_t &panel, lv_indev_t *&touch_indev)
 {
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = BROOKESIA_LVGL_TASK_STACK_SIZE;
@@ -408,7 +409,6 @@ lv_display_t *start_brookesia_display()
     const bsp_display_config_t panel_config = {
         .max_transfer_sz = BROOKESIA_LCD_MAX_TRANSFER_SIZE,
     };
-    esp_lcd_panel_handle_t panel = nullptr;
     esp_lcd_panel_io_handle_t panel_io = nullptr;
     if (bsp_display_new(&panel_config, &panel, &panel_io) != ESP_OK) {
         return nullptr;
@@ -445,7 +445,8 @@ lv_display_t *start_brookesia_display()
     }
     const esp_lv_adapter_touch_config_t touch_config =
         ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(display, touch);
-    if (esp_lv_adapter_register_touch(&touch_config) == nullptr) {
+    touch_indev = esp_lv_adapter_register_touch(&touch_config);
+    if (touch_indev == nullptr) {
         return nullptr;
     }
 
@@ -528,7 +529,9 @@ void update_status_bar_clock(lv_timer_t *timer)
 extern "C" void app_main(void)
 {
     ESP_UTILS_LOGI("Starting ESP32-S3-Touch-AMOLED-1.75 Brookesia firmware");
-    lv_display_t *display = start_brookesia_display();
+    esp_lcd_panel_handle_t panel = nullptr;
+    lv_indev_t *touch_indev = nullptr;
+    lv_display_t *display = start_brookesia_display(panel, touch_indev);
     ESP_UTILS_CHECK_NULL_EXIT(display, "Start display failed");
 
     LvLock::registerCallbacks([](int timeout_ms) {
@@ -742,5 +745,12 @@ extern "C" void app_main(void)
     // Wi-Fi callbacks and the status bar service are now initialized, so user
     // interaction can safely enter Settings or launch an application.
     input_guard.enable();
+    {
+        LvLockGuard gui_guard;
+        const esp_err_t power_result = brookesia::screen_power::start(panel, touch_indev, phone);
+        if (power_result != ESP_OK) {
+            ESP_UTILS_LOGW("POWER screen control unavailable: %s", esp_err_to_name(power_result));
+        }
+    }
     ESP_UTILS_LOGI("Brookesia firmware is ready");
 }

@@ -118,6 +118,7 @@ bool Gesture::del(void)
 
     _direction_tan_threshold = 0;
     _touch_start_tick = 0;
+    _touch_input_blocked = false;
     _detect_timer.reset();
     resetGestureInfo();
     _event_mask_obj.reset();
@@ -481,6 +482,38 @@ void Gesture::onTouchDetectTimerCallback(struct _lv_timer_t *t)
 
     Gesture *gesture = (Gesture *)t->user_data;
     ESP_UTILS_CHECK_NULL_EXIT(gesture, "Invalid gesture");
+
+    // This timer reads the input state directly, bypassing LVGL's input gates.
+    // Cancel an interrupted gesture without sending a release/navigation event.
+    if (!gesture->_touch_device->enabled || gesture->_touch_device->wait_until_release) {
+        if (gesture->_touch_input_blocked) {
+            return;
+        }
+        gesture->_touch_input_blocked = true;
+        gesture->resetGestureInfo();
+        gesture->_touch_start_tick = 0;
+        // Consumers also keep gesture state until release; cancel it once even
+        // when the display stays off or a finger remains down during wakeup.
+        lv_obj_send_event(gesture->_event_mask_obj.get(), LV_EVENT_CANCEL, nullptr);
+        ESP_UTILS_CHECK_FALSE_EXIT(gesture->setMaskObjectVisible(false), "Hide gesture mask failed");
+        for (int i = 0; i < static_cast<int>(Gesture::IndicatorBarType::MAX); i++) {
+            const auto type = static_cast<Gesture::IndicatorBarType>(i);
+            ESP_UTILS_CHECK_FALSE_EXIT(
+                gesture->controlIndicatorBarScaleBackAnim(type, false), "Stop indicator animation failed"
+            );
+            if (type == Gesture::IndicatorBarType::BOTTOM) {
+                // Preserve the manager's bottom-bar visibility for the current app.
+                ESP_UTILS_CHECK_FALSE_EXIT(
+                    gesture->setIndicatorBarLength(type, gesture->_indicator_bar_max_lengths[i]),
+                    "Reset bottom indicator length failed"
+                );
+            } else {
+                ESP_UTILS_CHECK_FALSE_EXIT(gesture->setIndicatorBarVisible(type, false), "Hide indicator bar failed");
+            }
+        }
+        return;
+    }
+    gesture->_touch_input_blocked = false;
 
     const Gesture::Data &data = gesture->data;
     const int &display_w = gesture->core.getData().screen_size.width;

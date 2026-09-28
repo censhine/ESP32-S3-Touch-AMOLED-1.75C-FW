@@ -81,6 +81,7 @@ private:
     // Navigation Bar
     static void onNavigationBarGestureEventCallback(lv_event_t *event);
     // Gesture
+    static void onGestureCancelEventCallback(lv_event_t *event);
     static void onGestureNavigationPressingEventCallback(lv_event_t *event);
     static void onGestureNavigationReleaseEventCallback(lv_event_t *event);
     static void onGestureMaskIndicatorPressingEventCallback(lv_event_t *event);
