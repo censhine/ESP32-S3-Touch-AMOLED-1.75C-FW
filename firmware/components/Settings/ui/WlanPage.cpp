@@ -34,9 +34,6 @@ namespace esp_brookesia::apps
 
     WlanPage *WlanPage::_instance = nullptr;
 
-    lv_obj_t *WlanPage::ta = nullptr;
-    lv_obj_t *WlanPage::kb = nullptr;
-
     WlanPage *WlanPage::requestInstance(bool use_status_bar, bool use_navigation_bar)
     {
         if (_instance == nullptr)
@@ -55,9 +52,7 @@ namespace esp_brookesia::apps
         wlan_switch = nullptr;
         wifi_icon = nullptr;
         spinner = nullptr;
-        password_title = nullptr;
         wifi_TaskHandle = nullptr;
-        wifi_index = 0;
     }
 
     WlanPage::~WlanPage() {}
@@ -130,6 +125,11 @@ namespace esp_brookesia::apps
     {
         ESP_UTILS_LOGI("WlanPage Back");
 
+        if (password_editor && password_editor->visible()) {
+            cancel_password(this);
+            return true;
+        }
+
         Settings::requestInstance()->showRootPage();
         return true;
     }
@@ -150,6 +150,8 @@ namespace esp_brookesia::apps
 
         if(wifi_events_registered)
             stop_wifi_events();
+        // Destroy the editor while its parent and event callbacks are valid.
+        password_editor.reset();
         if (page_root != nullptr)
         {
             lv_obj_del(page_root);
@@ -163,9 +165,6 @@ namespace esp_brookesia::apps
             wlan_switch = nullptr;
             wifi_icon = nullptr;
             spinner = nullptr;
-            password_title = nullptr;
-            ta = nullptr;
-            kb = nullptr;
             wifi_btns.clear();
             settings_ui::reset_list_styles(style_list, style_list_btn, style_list_text, style_list_btn_pressed);
         }
@@ -228,20 +227,6 @@ namespace esp_brookesia::apps
         // lv_obj_add_state(conn_btn, LV_STATE_DISABLED);
 
         lv_obj_update_layout(page_root);
-        const lv_coord_t horizontal_margin = settings_ui::get_horizontal_margin(page_root);
-        const lv_coord_t header_bottom = settings_ui::get_header_top(page_root) +
-                                         settings_ui::PAGE_HEADER_HEIGHT;
-        const lv_coord_t keyboard_bottom = round_page
-                                           ? settings_ui::get_bottom_margin(page_root) : 16;
-        lv_coord_t content_width = lv_obj_get_width(page_root) - horizontal_margin * 2;
-        lv_coord_t keyboard_height = lv_obj_get_height(page_root) * (round_page ? 33 : 48) / 100;
-        if (content_width < 1) {
-            content_width = 1;
-        }
-        if (keyboard_height < 1) {
-            keyboard_height = 1;
-        }
-
         spinner = lv_spinner_create(page_root);
         lv_obj_set_size(spinner, round_page ? 56 : 72, round_page ? 56 : 72);
         lv_obj_align(spinner, LV_ALIGN_CENTER, 0, round_page ? 8 : 36);
@@ -250,61 +235,8 @@ namespace esp_brookesia::apps
         lv_obj_set_style_arc_width(spinner, 4, LV_PART_INDICATOR);
         lv_obj_set_style_arc_color(spinner, lv_color_hex(settings_ui::COLOR_ACCENT), LV_PART_INDICATOR);
 
-        password_title = lv_label_create(page_root);
-        lv_label_set_text(password_title, "Connect to network");
-        lv_label_set_long_mode(password_title, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(password_title, content_width);
-        lv_obj_set_style_text_font(password_title,
-                                   round_page ? &lv_font_montserrat_20 : &lv_font_montserrat_24,
-                                   LV_PART_MAIN);
-        lv_obj_set_style_text_color(password_title, lv_color_hex(settings_ui::COLOR_PRIMARY_TEXT), LV_PART_MAIN);
-        lv_obj_align(password_title, LV_ALIGN_TOP_MID, 0, header_bottom + (round_page ? 12 : 20));
-        lv_obj_add_flag(password_title, LV_OBJ_FLAG_HIDDEN);
-
-        ta = lv_textarea_create(page_root);
-        lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_size(ta, content_width, round_page ? 52 : 64);
-        lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, header_bottom + (round_page ? 44 : 64));
-
-        lv_textarea_set_password_mode(ta, true);
-        lv_textarea_set_max_length(ta, sizeof(wifi_pwd) - 1);
-        lv_textarea_set_password_show_time(ta, 1500);
-        lv_textarea_set_placeholder_text(ta, "Enter password...");
-        lv_obj_set_style_bg_color(ta, lv_color_hex(settings_ui::COLOR_SURFACE), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_color(ta, lv_color_hex(settings_ui::COLOR_BORDER), LV_PART_MAIN);
-        lv_obj_set_style_border_width(ta, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(ta, 6, LV_PART_MAIN);
-        lv_obj_set_style_text_color(ta, lv_color_hex(settings_ui::COLOR_PRIMARY_TEXT), LV_PART_MAIN);
-        lv_obj_set_style_text_color(ta, lv_color_hex(settings_ui::COLOR_SECONDARY_TEXT), LV_PART_TEXTAREA_PLACEHOLDER);
-        lv_obj_set_style_text_font(ta,
-                                   round_page ? &lv_font_montserrat_18 : &lv_font_montserrat_20,
-                                   LV_PART_MAIN);
-        lv_obj_set_style_text_font(ta,
-                                   round_page ? &lv_font_montserrat_18 : &lv_font_montserrat_20,
-                                   LV_PART_TEXTAREA_PLACEHOLDER);
-        lv_obj_set_style_bg_color(ta, lv_color_white(), LV_PART_CURSOR);
-        lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, LV_PART_CURSOR);
-        lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_ALL, this);
-
-        kb = lv_keyboard_create(page_root);
-        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_size(kb, content_width, keyboard_height);
-        lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, -keyboard_bottom);
-        lv_obj_set_style_bg_color(kb, lv_color_hex(0x181818), LV_PART_MAIN);
-        lv_obj_set_style_border_color(kb, lv_color_hex(settings_ui::COLOR_BORDER), LV_PART_MAIN);
-        lv_obj_set_style_border_width(kb, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(kb, 6, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(kb, lv_color_hex(0x333333), LV_PART_ITEMS);
-        lv_obj_set_style_text_color(kb, lv_color_hex(settings_ui::COLOR_PRIMARY_TEXT), LV_PART_ITEMS);
-        lv_obj_set_style_text_font(kb,
-                                   round_page ? &lv_font_montserrat_16 : &lv_font_montserrat_20,
-                                   LV_PART_ITEMS);
-        lv_obj_set_style_border_color(kb, lv_color_hex(0x555555), LV_PART_ITEMS);
-        lv_obj_set_style_border_width(kb, 1, LV_PART_ITEMS);
-        lv_obj_set_style_radius(kb, 4, LV_PART_ITEMS);
-        lv_keyboard_set_textarea(kb, ta);
-        lv_obj_add_event_cb(kb, kb_event_cb, LV_EVENT_ALL, this);
+        password_editor = std::make_unique<settings_ui::WifiPasswordKeyboard>(
+            page_root, submit_password, cancel_password, this);
     }
 
     bool WlanPage::OpenWifi()
@@ -388,14 +320,9 @@ namespace esp_brookesia::apps
         if (!self || !self->page_active || !self->list1) {
             return;
         }
-        if (self->kb) {
-            lv_obj_add_flag(self->kb, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (self->ta) {
-            lv_obj_add_flag(self->ta, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (self->password_title) {
-            lv_obj_add_flag(self->password_title, LV_OBJ_FLAG_HIDDEN);
+        // A reconnect/scan result must not dismiss a password being edited.
+        if (self->password_editor && self->password_editor->visible()) {
+            return;
         }
         if (self->spinner) {
             lv_obj_add_flag(self->spinner, LV_OBJ_FLAG_HIDDEN);
@@ -437,36 +364,25 @@ namespace esp_brookesia::apps
         }
         // When a network in the list is pressed
         if(event_code == LV_EVENT_SHORT_CLICKED) {
-            page->wifi_index = ud->index;
+            // A later scan may replace ap_info while the password overlay is
+            // open. Each row retains the exact network its label represents.
+            strlcpy(page->selected_ssid, ud->ssid, sizeof(page->selected_ssid));
+            page->selected_authmode = ud->authmode;
+            ESP_UTILS_LOGI("Selected SSID: %s", page->selected_ssid);
 
-            ESP_UTILS_LOGI("wifi_index %d", page->wifi_index);
-
-            copy_bounded_ssid(page->wifi_ssid, sizeof(page->wifi_ssid),
-                              page->ap_info[page->wifi_index].ssid,
-                              sizeof(page->ap_info[page->wifi_index].ssid));
-            ESP_UTILS_LOGI("Selected SSID: %s", page->wifi_ssid);
-
-            if (page->ap_info[page->wifi_index].authmode == WIFI_AUTH_OPEN) {
+            if (page->selected_authmode == WIFI_AUTH_OPEN) {
+                strlcpy(page->wifi_ssid, page->selected_ssid, sizeof(page->wifi_ssid));
                 page->wifi_pwd[0] = '\0';
                 page->Wifi_state = CONNECTING;
-                lv_obj_add_flag(page->kb, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(page->ta, LV_OBJ_FLAG_HIDDEN);
+                page->password_editor->hide();
                 lv_obj_remove_flag(page->spinner, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_add_state(page->wlan_switch, LV_STATE_DISABLED);
                 lv_obj_add_flag(page->list1, LV_OBJ_FLAG_HIDDEN);
                 return;
             }
 
-            if (page->password_title) {
-                lv_label_set_text_fmt(page->password_title, "Connect to %s", page->wifi_ssid);
-                lv_obj_remove_flag(page->password_title, LV_OBJ_FLAG_HIDDEN);
-            }
-            lv_textarea_set_text(ta, "");
             lv_obj_add_flag(page->list1, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(ta, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_state(ta, LV_STATE_FOCUSED);
-            lv_obj_remove_flag(kb, LV_OBJ_FLAG_HIDDEN);
-            lv_keyboard_set_textarea(kb, ta);
+            page->password_editor->show(page->selected_ssid);
 
         }
     }
@@ -478,6 +394,9 @@ namespace esp_brookesia::apps
         if (!consume_timer_context(timer, &self, &generation) ||
                 !self->page_active || self->page_generation.load() != generation ||
                 !self->list1) {
+            return;
+        }
+        if (self->password_editor && self->password_editor->visible()) {
             return;
         }
 
@@ -581,7 +500,9 @@ namespace esp_brookesia::apps
                 continue;
             }
 
-            ud->index = i;
+            copy_bounded_ssid(ud->ssid, sizeof(ud->ssid), self->ap_info[i].ssid,
+                              sizeof(self->ap_info[i].ssid));
+            ud->authmode = self->ap_info[i].authmode;
             ud->self = self;
             lv_obj_add_event_cb(wifi_btn,wifi_btn_cb, LV_EVENT_ALL, ud);
 
@@ -668,67 +589,37 @@ namespace esp_brookesia::apps
         }
     }
 
-    // Keyboard READY/CANCEL hides the input and lets wifi_task perform the blocking connect.
-    void WlanPage::kb_event_cb(lv_event_t *e)
+    void WlanPage::submit_password(const char *password, void *context)
     {
-        WlanPage *self = (WlanPage *)lv_event_get_user_data(e);
-        lv_event_code_t code = lv_event_get_code(e);
-
-        if (code == LV_EVENT_CANCEL) {
-            lv_obj_add_flag(self->kb, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(self->ta, LV_OBJ_FLAG_HIDDEN);
-            if (self->password_title) {
-                lv_obj_add_flag(self->password_title, LV_OBJ_FLAG_HIDDEN);
-            }
-            lv_obj_remove_flag(self->list1, LV_OBJ_FLAG_HIDDEN);
-            lv_textarea_set_text(self->ta, "");
+        auto *self = static_cast<WlanPage *>(context);
+        if (!self || !self->page_active || !password) {
             return;
         }
-
-        if (code == LV_EVENT_READY) {
-
-            strlcpy(self->wifi_pwd, lv_textarea_get_text(ta), sizeof(self->wifi_pwd));
-            ESP_UTILS_LOGI("Wi-Fi password length: %u", static_cast<unsigned>(strlen(self->wifi_pwd)));
-            if (strlen(self->wifi_pwd) >= 8)
-            {
-                self->Wifi_state = CONNECTING;
-            }
-            else
-            {
-                self->Wifi_state = DISCONNECT;
-                queue_lvgl_async_from_gui(wifi_state_cb, self);
-            }
-            lv_obj_add_flag(self->kb, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(self->ta, LV_OBJ_FLAG_HIDDEN);
-            if (self->password_title) {
-                lv_obj_add_flag(self->password_title, LV_OBJ_FLAG_HIDDEN);
-            }
-            lv_obj_remove_flag(self->spinner, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_state(self->wlan_switch, LV_STATE_DISABLED);
-            lv_obj_add_flag(self->list1, LV_OBJ_FLAG_HIDDEN);
-
+        // The editor validates length before invoking us. Copy the draft
+        // before hide() clears it, then publish the state to the worker.
+        strlcpy(self->wifi_pwd, password, sizeof(self->wifi_pwd));
+        strlcpy(self->wifi_ssid, self->selected_ssid, sizeof(self->wifi_ssid));
+        self->password_editor->hide();
+        lv_obj_remove_flag(self->spinner, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_state(self->wlan_switch, LV_STATE_DISABLED);
+        lv_obj_add_flag(self->list1, LV_OBJ_FLAG_HIDDEN);
+        self->Wifi_state = CONNECTING;
+        if (self->wifi_TaskHandle) {
+            xTaskNotifyGive(self->wifi_TaskHandle);
         }
     }
 
-    // Textarea focus controls keyboard visibility.
-    void WlanPage::ta_event_cb(lv_event_t * e)
+    void WlanPage::cancel_password(void *context)
     {
-        WlanPage *self = (WlanPage *)lv_event_get_user_data(e);
-        lv_obj_t * ta = (lv_obj_t*)lv_event_get_target(e);
-
-        if (lv_event_get_code(e) == LV_EVENT_FOCUSED) {
-            lv_obj_remove_flag(kb, LV_OBJ_FLAG_HIDDEN);
-            lv_keyboard_set_textarea(kb, ta);
+        auto *self = static_cast<WlanPage *>(context);
+        if (!self || !self->page_active) {
+            return;
         }
-        else if (lv_event_get_code(e) == LV_EVENT_DEFOCUSED) {
-            lv_obj_remove_flag(self->list1, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(ta, LV_OBJ_FLAG_HIDDEN);
-            if (self->password_title) {
-                lv_obj_add_flag(self->password_title, LV_OBJ_FLAG_HIDDEN);
-            }
-            lv_keyboard_set_textarea(kb, NULL);
-        }
+        self->password_editor->hide();
+        self->selected_ssid[0] = '\0';
+        // Restore the latest connection state after any refresh deferred while
+        // typing, without touching the saved Wi-Fi configuration.
+        wifi_state_cb(self);
     }
 
     // ESP event loop callback. UI work is deferred with lv_async_call because the
@@ -1084,8 +975,11 @@ namespace esp_brookesia::apps
                 memcpy(wifi_config.sta.ssid, self->wifi_ssid,
                        ssid_length < sizeof(wifi_config.sta.ssid) ?
                        ssid_length : sizeof(wifi_config.sta.ssid));
-                strlcpy((char *)wifi_config.sta.password, self->wifi_pwd, sizeof(wifi_config.sta.password));
-                wifi_config.sta.threshold.authmode = self->ap_info[self->wifi_index].authmode;
+                // ESP-IDF accepts a full 64-byte hexadecimal PSK without a
+                // terminator; shorter passphrases use the zeroed suffix.
+                const size_t password_length = strnlen(self->wifi_pwd, sizeof(self->wifi_pwd) - 1);
+                memcpy(wifi_config.sta.password, self->wifi_pwd, password_length);
+                wifi_config.sta.threshold.authmode = self->selected_authmode;
 
                 // The resident service serializes configuration and reconnects
                 // even after this page is closed.

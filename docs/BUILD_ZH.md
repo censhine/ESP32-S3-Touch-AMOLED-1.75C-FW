@@ -46,6 +46,8 @@ python firmware/tools/tests/test_rebase_local_lock.py
 
 游戏主机测试使用和整机一致的LVGL 9.4.0。存储测试用主机桩检查服务的错误处理和并发逻辑，不能代替真实Flash/WL/FatFs测试。
 
+`ctest` 也包含 Wi-Fi 密码大键盘的真实 LVGL 指针测试，覆盖分页、字符输入、密码校验、圆屏边界和销毁。测试生成的界面预览位于 `build-native/artifacts/wifi-keyboard-*.ppm`。
+
 ## 已迁移设备的应用更新
 
 设备已经使用本项目的分区表和资源时，只更新应用可执行：

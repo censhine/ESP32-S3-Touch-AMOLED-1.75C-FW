@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include "WifiPasswordKeyboard.hpp"
 
 #include "esp_brookesia.hpp"
 #include "freertos/FreeRTOS.h"
@@ -55,7 +57,8 @@ public:
 private:
 
     typedef struct {
-        int index;
+        char ssid[33];
+        wifi_auth_mode_t authmode;
         void *self;
     } btn_user_data_t;
 
@@ -84,9 +87,7 @@ private:
     lv_obj_t *wifi_icon;
 
     lv_obj_t *spinner;
-    lv_obj_t *password_title;
-    static lv_obj_t *ta;
-    static lv_obj_t *kb;
+    std::unique_ptr<settings_ui::WifiPasswordKeyboard> password_editor;
 
 
     // UI controls that are updated from scan/connect callbacks.
@@ -125,7 +126,8 @@ private:
     bool sta_config_snapshot_valid = false;
     uint32_t sta_config_snapshot_generation = 0;
 
-    int wifi_index;
+    char selected_ssid[33] = {};
+    wifi_auth_mode_t selected_authmode = WIFI_AUTH_OPEN;
     char wifi_ssid[33] = {};
     char wifi_pwd[65] = {};
     uint8_t connection_num = 0;
@@ -157,8 +159,8 @@ private:
     bool OpenWifi();
     bool CloseWifi();
     // Password input and keyboard helpers.
-    static void kb_event_cb(lv_event_t *e);
-    static void ta_event_cb(lv_event_t *e);
+    static void submit_password(const char *password, void *context);
+    static void cancel_password(void *context);
 
     // NVS keys for page-level settings.
     #define NVS_STORAGE_NAMESPACE           "storage"

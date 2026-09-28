@@ -281,6 +281,9 @@ namespace esp_brookesia::apps
     bool Settings::back(void)
     {
         ESP_UTILS_LOGD("Back");
+        if (active_page == ActivePage::Wlan) {
+            return WlanPage::requestInstance(false, false)->back();
+        }
         if (active_page != ActivePage::None)
         {
             showRootPage();
