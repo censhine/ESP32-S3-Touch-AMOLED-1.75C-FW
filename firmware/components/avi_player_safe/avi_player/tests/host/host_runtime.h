@@ -1,6 +1,20 @@
 #pragma once
 
 #include <stdio.h>
+#include <stdint.h>
+
+typedef struct {
+    int live_tasks;
+    int caps_tasks_created;
+    int caps_tasks_deleted;
+    uint32_t last_stack_size;
+    uint32_t last_stack_caps;
+    int internal_stack_reads;
+    int other_stack_reads;
+} host_task_stats_t;
+
+host_task_stats_t host_task_stats(void);
+void host_reset_task_stats(void);
 
 FILE *host_tracked_fopen(const char *path, const char *mode);
 int host_tracked_fclose(FILE *file);

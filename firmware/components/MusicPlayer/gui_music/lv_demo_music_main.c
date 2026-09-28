@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "bsp_board_extra.h"
 #include "audio_player.h"
+#include "music_player_support.h"
 
 /*********************
  *      DEFINES
@@ -69,6 +70,9 @@ static void timer_cb(lv_timer_t * t);
 static void track_load(uint32_t id);
 static void stop_start_anim(lv_timer_t * t);
 static void spectrum_end_cb(lv_anim_t * a);
+static void start_spectrum_animation(void);
+static void stop_playback_ui(void);
+static void resume_track(uint32_t id);
 static void album_fade_anim_cb(void * var, int32_t v);
 static int32_t get_cos(int32_t deg, int32_t a);
 static int32_t get_sin(int32_t deg, int32_t a);
@@ -90,6 +94,10 @@ static uint32_t bar_ofs = 0;
 static uint32_t spectrum_lane_ofs_start = 0;
 static uint32_t bar_rot = 0;
 static uint32_t time_act;
+static uint32_t elapsed_ms;
+static uint32_t last_counter_tick;
+static uint32_t track_duration;
+static music_playback_watch_t playback_watch;
 static lv_timer_t  * stop_start_anim_timer;
 static lv_timer_t  * sec_counter_timer;
 static const lv_font_t * font_small;
@@ -145,6 +153,8 @@ lv_obj_t * lv_demo_music_main_create(lv_obj_t * parent, file_iterator_instance_t
     spectrum_lane_ofs_start = 0;
     bar_rot = 0;
     time_act = 0;
+    elapsed_ms = 0;
+    track_duration = 0;
     track_id = 0;
     start_anim = false;
     spectrum_len = 0;
@@ -278,7 +288,7 @@ lv_obj_t * lv_demo_music_main_create(lv_obj_t * parent, file_iterator_instance_t
     lv_obj_set_grid_cell(spectrum_obj, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_CENTER, 1, 9);
 #endif
 
-    sec_counter_timer = lv_timer_create(timer_cb, 1000, NULL);
+    sec_counter_timer = lv_timer_create(timer_cb, 100, NULL);
     if(sec_counter_timer) {
         lv_timer_pause(sec_counter_timer);
     }
@@ -402,45 +412,63 @@ void lv_demo_music_album_next(bool next)
 
 void lv_demo_music_play(uint32_t id)
 {
-    if(id >= lv_demo_music_get_track_count()) {
-        return;
-    }
-
-    track_load(id);
-
-    lv_demo_music_resume();
+    resume_track(id);
 }
 
 void lv_demo_music_resume(void)
 {
-    if(track_id >= lv_demo_music_get_track_count() || spectrum_len == 0) {
+    resume_track(track_id);
+}
+
+static void resume_track(uint32_t id)
+{
+    if(id >= lv_demo_music_get_track_count() || spectrum_len == 0) {
         return;
     }
 
     esp_err_t ret;
-    if (!pause_exit && pause && bsp_extra_player_is_playing_by_index(file_iterator, track_id)) {
+    bool resuming = id == track_id && !pause_exit && pause &&
+                    bsp_extra_player_is_playing_by_index(file_iterator, id);
+    if(resuming) {
         LV_LOG_USER("Resume music");
         ret = audio_player_resume();
     }
     else {
-        pause_exit = false;
         LV_LOG_USER("Music is not playing. Start playing.");
-        ret = bsp_extra_player_play_index(file_iterator, track_id);
+        ret = bsp_extra_player_play_index(file_iterator, id);
     }
 
     if(ret != ESP_OK) {
         ESP_LOGE("MusicPlayer", "Failed to start track %" LV_PRIu32 ": %s",
-                 track_id, esp_err_to_name(ret));
-        lv_demo_music_pause();
-        pause = false;
-        spectrum_i_pause = 0;
-        time_act = 0;
-        lv_slider_set_value(slider_obj, 0, LV_ANIM_OFF);
-        lv_label_set_text(time_obj, "0:00");
+                 id, esp_err_to_name(ret));
+        /* Enqueue/open failed: retain the current track and playback state. */
+        if(playing) lv_obj_add_state(play_obj, LV_STATE_CHECKED);
+        else lv_obj_remove_state(play_obj, LV_STATE_CHECKED);
         return;
     }
 
+    pause_exit = false;
+    if(!resuming) {
+        track_load(id);
+    }
+    last_counter_tick = lv_tick_get();
+    music_playback_watch_start(&playback_watch, last_counter_tick);
+    track_duration = lv_demo_music_get_track_length(track_id);
+    lv_slider_set_range(slider_obj, 0, track_duration ? track_duration : 1);
+    lv_obj_set_style_opa(slider_obj, track_duration ? LV_OPA_COVER : LV_OPA_40, 0);
+
     spectrum_i = spectrum_i_pause;
+    start_spectrum_animation();
+
+    if(sec_counter_timer) lv_timer_resume(sec_counter_timer);
+    lv_obj_add_state(play_obj, LV_STATE_CHECKED);
+    lv_demo_music_list_button_check(track_id, true);
+    playing = true;
+    pause = false;
+}
+
+static void start_spectrum_animation(void)
+{
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_values(&a, spectrum_i, spectrum_len - 1);
@@ -450,18 +478,18 @@ void lv_demo_music_resume(void)
     lv_anim_set_playback_duration(&a, 0);
     lv_anim_set_completed_cb(&a, spectrum_end_cb);
     lv_anim_start(&a);
-
-    if(sec_counter_timer) lv_timer_resume(sec_counter_timer);
-    lv_slider_set_range(slider_obj, 0, lv_demo_music_get_track_length(track_id));
-
-    lv_obj_add_state(play_obj, LV_STATE_CHECKED);
-    playing = true;
-    pause = false;
 }
 
 void lv_demo_music_pause(void)
 {
     if(!playing || lv_demo_music_get_track_count() == 0) {
+        return;
+    }
+
+    esp_err_t ret = audio_player_pause();
+    if(ret != ESP_OK) {
+        ESP_LOGW("MusicPlayer", "Failed to pause playback: %s", esp_err_to_name(ret));
+        lv_obj_add_state(play_obj, LV_STATE_CHECKED);
         return;
     }
 
@@ -472,10 +500,22 @@ void lv_demo_music_pause(void)
     lv_anim_delete(spectrum_obj, spectrum_anim_cb);
     lv_obj_invalidate(spectrum_obj);
     lv_image_set_scale(album_image_obj, LV_SCALE_NONE);
+    lv_obj_remove_state(play_obj, LV_STATE_CHECKED);
+    lv_demo_music_list_button_check(track_id, false);
+}
+
+static void stop_playback_ui(void)
+{
+    playing = false;
+    pause = false;
+    spectrum_i = 0;
+    spectrum_i_pause = 0;
+    lv_anim_delete(spectrum_obj, spectrum_anim_cb);
+    lv_obj_invalidate(spectrum_obj);
+    lv_image_set_scale(album_image_obj, LV_SCALE_NONE);
     if(sec_counter_timer) lv_timer_pause(sec_counter_timer);
     lv_obj_remove_state(play_obj, LV_STATE_CHECKED);
-
-    audio_player_pause();
+    lv_demo_music_list_button_check(track_id, false);
 }
 
 void lv_demo_music_exit_pause(void)
@@ -842,6 +882,8 @@ static void track_load(uint32_t id)
 
     spectrum_i = 0;
     time_act = 0;
+    elapsed_ms = 0;
+    last_counter_tick = lv_tick_get();
     spectrum_i_pause = 0;
     lv_slider_set_value(slider_obj, 0, LV_ANIM_OFF);
     lv_label_set_text(time_obj, "0:00");
@@ -853,8 +895,6 @@ static void track_load(uint32_t id)
     lv_demo_music_list_button_check(track_id, false);
 
     track_id = id;
-
-    lv_demo_music_list_button_check(id, true);
 
     lv_label_set_text(title_label, lv_demo_music_get_title(track_id));
     lv_label_set_text(artist_label, lv_demo_music_get_artist(track_id));
@@ -1179,15 +1219,33 @@ static void next_click_event_cb(lv_event_t * e)
 static void timer_cb(lv_timer_t * t)
 {
     LV_UNUSED(t);
-    time_act++;
+    uint32_t now = lv_tick_get();
+    uint32_t delta = now - last_counter_tick;
+    last_counter_tick = now;
+    audio_player_state_t state = audio_player_get_state();
+    bool active = state == AUDIO_PLAYER_STATE_PLAYING || state == AUDIO_PLAYER_STATE_PAUSE;
+    bool finished = music_playback_watch_finished(&playback_watch, now, active,
+                                                  state == AUDIO_PLAYER_STATE_SHUTDOWN);
+    if(playing && state == AUDIO_PLAYER_STATE_PLAYING) elapsed_ms += delta;
+    time_act = elapsed_ms / 1000;
+    if(finished) {
+        /* Worker EOF/error is authoritative; the decorative spectrum has no
+         * relationship to the selected file's duration. Stay on this track. */
+        time_act = (uint32_t)(((uint64_t)elapsed_ms + 999) / 1000);
+        stop_playback_ui();
+    }
+    if(track_duration && time_act > track_duration) time_act = track_duration;
     lv_label_set_text_fmt(time_obj, "%"LV_PRIu32":%02"LV_PRIu32, time_act / 60, time_act % 60);
-    lv_slider_set_value(slider_obj, time_act, LV_ANIM_ON);
+    lv_slider_set_value(slider_obj, track_duration ? time_act : 0, LV_ANIM_ON);
 }
 
 static void spectrum_end_cb(lv_anim_t * a)
 {
     LV_UNUSED(a);
-    lv_demo_music_album_next(true);
+    if(playing) {
+        spectrum_i = 0;
+        start_spectrum_animation();
+    }
 }
 
 static void stop_start_anim(lv_timer_t * t)

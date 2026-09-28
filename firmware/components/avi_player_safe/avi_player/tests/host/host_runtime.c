@@ -9,8 +9,10 @@
 #include <time.h>
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -25,9 +27,10 @@ struct host_semaphore {
 };
 
 struct host_task {
-    pthread_t thread;
     TaskFunction_t function;
     void *argument;
+    bool with_caps;
+    UBaseType_t stack_caps;
 };
 
 struct host_timer {
@@ -40,6 +43,37 @@ static _Thread_local TaskHandle_t s_current_task;
 static atomic_int s_open_files;
 static atomic_int s_fread_calls;
 static atomic_int s_fread_fail_after = -1;
+static atomic_int s_live_tasks;
+static atomic_int s_caps_tasks_created;
+static atomic_int s_caps_tasks_deleted;
+static atomic_uint s_last_stack_size;
+static atomic_uint s_last_stack_caps;
+static atomic_int s_internal_stack_reads;
+static atomic_int s_other_stack_reads;
+
+host_task_stats_t host_task_stats(void)
+{
+    return (host_task_stats_t) {
+        .live_tasks = atomic_load(&s_live_tasks),
+        .caps_tasks_created = atomic_load(&s_caps_tasks_created),
+        .caps_tasks_deleted = atomic_load(&s_caps_tasks_deleted),
+        .last_stack_size = atomic_load(&s_last_stack_size),
+        .last_stack_caps = atomic_load(&s_last_stack_caps),
+        .internal_stack_reads = atomic_load(&s_internal_stack_reads),
+        .other_stack_reads = atomic_load(&s_other_stack_reads),
+    };
+}
+
+void host_reset_task_stats(void)
+{
+    assert(atomic_load(&s_live_tasks) == 0);
+    atomic_store(&s_caps_tasks_created, 0);
+    atomic_store(&s_caps_tasks_deleted, 0);
+    atomic_store(&s_last_stack_size, 0);
+    atomic_store(&s_last_stack_caps, 0);
+    atomic_store(&s_internal_stack_reads, 0);
+    atomic_store(&s_other_stack_reads, 0);
+}
 
 static void delay_milliseconds(long milliseconds)
 {
@@ -83,6 +117,14 @@ int host_tracked_fclose(FILE *file)
 
 size_t host_tracked_fread(void *buffer, size_t size, size_t count, FILE *file)
 {
+    // Observe the task that actually reaches stdio, not just its init config.
+    if (s_current_task != NULL && s_current_task->with_caps &&
+        (s_current_task->stack_caps & MALLOC_CAP_INTERNAL) != 0 &&
+        (s_current_task->stack_caps & MALLOC_CAP_SPIRAM) == 0) {
+        atomic_fetch_add(&s_internal_stack_reads, 1);
+    } else {
+        atomic_fetch_add(&s_other_stack_reads, 1);
+    }
     const int call_index = atomic_fetch_add(&s_fread_calls, 1);
     const int fail_after = atomic_load(&s_fread_fail_after);
     if (fail_after >= 0 && call_index >= fail_after) {
@@ -206,26 +248,36 @@ void vSemaphoreDelete(SemaphoreHandle_t semaphore)
     free(semaphore);
 }
 
+static void task_cleanup(void *argument)
+{
+    free(argument);
+    s_current_task = NULL;
+    atomic_fetch_sub(&s_live_tasks, 1);
+}
+
 static void *task_entry(void *argument)
 {
     TaskHandle_t task = argument;
     s_current_task = task;
+    pthread_cleanup_push(task_cleanup, task);
     task->function(task->argument);
+    pthread_cleanup_pop(1);
     return NULL;
 }
 
-BaseType_t xTaskCreatePinnedToCore(
+static BaseType_t create_task(
     TaskFunction_t function,
     const char *name,
     uint32_t stack_size,
     void *argument,
     UBaseType_t priority,
     TaskHandle_t *task_handle,
-    BaseType_t core_id
+    BaseType_t core_id,
+    bool with_caps,
+    UBaseType_t stack_caps
 )
 {
     (void)name;
-    (void)stack_size;
     (void)priority;
     (void)core_id;
     TaskHandle_t task = calloc(1, sizeof(*task));
@@ -234,13 +286,44 @@ BaseType_t xTaskCreatePinnedToCore(
     }
     task->function = function;
     task->argument = argument;
-    if (pthread_create(&task->thread, NULL, task_entry, task) != 0) {
+    task->with_caps = with_caps;
+    task->stack_caps = stack_caps;
+    atomic_fetch_add(&s_live_tasks, 1);
+    *task_handle = task;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, task_entry, task) != 0) {
+        atomic_fetch_sub(&s_live_tasks, 1);
+        *task_handle = NULL;
         free(task);
         return pdFAIL;
     }
-    pthread_detach(task->thread);
-    *task_handle = task;
+    pthread_detach(thread);
+    atomic_store(&s_last_stack_size, stack_size);
+    atomic_store(&s_last_stack_caps, stack_caps);
+    if (with_caps) {
+        atomic_fetch_add(&s_caps_tasks_created, 1);
+    }
     return pdPASS;
+}
+
+BaseType_t xTaskCreatePinnedToCore(
+    TaskFunction_t function, const char *name, uint32_t stack_size,
+    void *argument, UBaseType_t priority, TaskHandle_t *task_handle,
+    BaseType_t core_id
+)
+{
+    return create_task(function, name, stack_size, argument, priority,
+                       task_handle, core_id, false, MALLOC_CAP_INTERNAL);
+}
+
+BaseType_t xTaskCreatePinnedToCoreWithCaps(
+    TaskFunction_t function, const char *name, uint32_t stack_size,
+    void *argument, UBaseType_t priority, TaskHandle_t *task_handle,
+    BaseType_t core_id, UBaseType_t stack_caps
+)
+{
+    return create_task(function, name, stack_size, argument, priority,
+                       task_handle, core_id, true, stack_caps);
 }
 
 TaskHandle_t xTaskGetCurrentTaskHandle(void)
@@ -250,7 +333,16 @@ TaskHandle_t xTaskGetCurrentTaskHandle(void)
 
 void vTaskDelete(TaskHandle_t task_handle)
 {
-    (void)task_handle;
+    assert(task_handle == NULL || task_handle == s_current_task);
+    assert(s_current_task != NULL && !s_current_task->with_caps);
+    pthread_exit(NULL);
+}
+
+void vTaskDeleteWithCaps(TaskHandle_t task_handle)
+{
+    assert(task_handle == NULL || task_handle == s_current_task);
+    assert(s_current_task != NULL && s_current_task->with_caps);
+    atomic_fetch_add(&s_caps_tasks_deleted, 1);
     pthread_exit(NULL);
 }
 

@@ -8,6 +8,7 @@
 
 #include "avi_player.h"
 #include "avifile.h"
+#include "esp_heap_caps.h"
 #include "host_runtime.h"
 
 static atomic_int s_end_count;
@@ -145,7 +146,7 @@ static bool wait_for_count(atomic_int *value, int expected)
     return false;
 }
 
-static avi_player_handle_t new_player(size_t buffer_size)
+static avi_player_handle_t new_player_with_stack(size_t buffer_size, bool stack_in_psram)
 {
     avi_player_handle_t player = NULL;
     const avi_player_config_t config = {
@@ -154,15 +155,43 @@ static avi_player_handle_t new_player(size_t buffer_size)
         .avi_play_end_cb = end_callback,
         .priority = 5,
         .coreID = 0,
-        .stack_size = 4096,
+        .stack_size = 16 * 1024,
+        .stack_in_psram = stack_in_psram,
     };
     assert(avi_player_init(config, &player) == ESP_OK);
     assert(player != NULL);
+    const host_task_stats_t stats = host_task_stats();
+    assert(stats.caps_tasks_created == 1);
+    assert(stats.last_stack_size == 16 * 1024);
+    assert(stats.last_stack_caps == (stack_in_psram ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL));
     return player;
+}
+
+static avi_player_handle_t new_player(size_t buffer_size)
+{
+    return new_player_with_stack(buffer_size, false);
+}
+
+static void deinit_player(avi_player_handle_t player)
+{
+    assert(avi_player_deinit(player) == ESP_OK);
+    // DEINIT_DONE is sent just before task self-deletion. Allow that final
+    // cleanup to finish before inspecting counts or resetting the harness.
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000L};
+    for (int attempt = 0; attempt < 2000 && host_task_stats().live_tasks != 0; ++attempt) {
+        nanosleep(&delay, NULL);
+    }
+    const host_task_stats_t stats = host_task_stats();
+    assert(stats.live_tasks == 0);
+    assert(stats.caps_tasks_created == 1);
+    assert(stats.caps_tasks_deleted == 1);
+    assert(stats.other_stack_reads == 0);
+    assert(host_open_file_count() == 0);
 }
 
 static void reset_counters(void)
 {
+    host_reset_task_stats();
     host_clear_fread_failure();
     atomic_store(&s_end_count, 0);
     atomic_store(&s_video_count, 0);
@@ -184,7 +213,7 @@ static void test_media_read_failure_closes_file(void)
     assert(wait_for_count(&s_end_count, 1));
     assert(atomic_load(&s_video_count) == 0);
     assert(host_open_file_count() == 0);
-    assert(avi_player_deinit(player) == ESP_OK);
+    deinit_player(player);
     assert(host_open_file_count() == 0);
     host_clear_fread_failure();
     assert(remove(path) == 0);
@@ -201,12 +230,12 @@ static void test_start_then_immediate_stop(void)
     assert(avi_player_play_stop(player) == ESP_OK);
     assert(wait_for_count(&s_end_count, 1));
     assert(host_open_file_count() == 0);
-    assert(avi_player_deinit(player) == ESP_OK);
+    deinit_player(player);
     assert(host_open_file_count() == 0);
     assert(remove(path) == 0);
 }
 
-static void test_natural_end_then_deinit(void)
+static void test_internal_stack_file_playback_then_deinit(void)
 {
     const char *path = "avi_natural_end.tmp";
     write_test_file(path);
@@ -216,8 +245,9 @@ static void test_natural_end_then_deinit(void)
     assert(avi_player_play_from_file(player, path) == ESP_OK);
     assert(wait_for_count(&s_end_count, 1));
     assert(atomic_load(&s_video_count) == 1);
+    assert(host_task_stats().internal_stack_reads > 0);
     assert(host_open_file_count() == 0);
-    assert(avi_player_deinit(player) == ESP_OK);
+    deinit_player(player);
     assert(host_open_file_count() == 0);
     assert(remove(path) == 0);
 }
@@ -231,7 +261,7 @@ static void test_pending_stop_then_deinit(void)
     avi_player_handle_t player = new_player(512);
     assert(avi_player_play_from_file(player, path) == ESP_OK);
     assert(avi_player_play_stop(player) == ESP_OK);
-    assert(avi_player_deinit(player) == ESP_OK);
+    deinit_player(player);
     assert(atomic_load(&s_end_count) == 1);
     assert(host_open_file_count() == 0);
     assert(remove(path) == 0);
@@ -276,7 +306,8 @@ static void test_external_sd_fixture_playback(const char *path)
         .avi_play_end_cb = end_callback,
         .priority = 5,
         .coreID = 0,
-        .stack_size = 4096,
+        .stack_size = 16 * 1024,
+        .stack_in_psram = false,
     };
     assert(avi_player_init(config, &player) == ESP_OK);
     assert(player != NULL);
@@ -286,7 +317,8 @@ static void test_external_sd_fixture_playback(const char *path)
     assert(avi_player_play_stop(player) == ESP_OK);
     assert(wait_for_count(&s_end_count, 1));
     assert(host_open_file_count() == 0);
-    assert(avi_player_deinit(player) == ESP_OK);
+    assert(host_task_stats().internal_stack_reads > 0);
+    deinit_player(player);
     assert(host_open_file_count() == 0);
 }
 
@@ -301,18 +333,33 @@ static void test_header_larger_than_buffer_fails_closed(void)
     assert(wait_for_count(&s_end_count, 1));
     assert(atomic_load(&s_video_count) == 0);
     assert(host_open_file_count() == 0);
-    assert(avi_player_deinit(player) == ESP_OK);
+    deinit_player(player);
     assert(host_open_file_count() == 0);
     assert(remove(path) == 0);
+}
+
+static void test_psram_stack_memory_playback_then_deinit(void)
+{
+    uint8_t avi[236];
+    const size_t size = make_test_avi(avi, sizeof(avi));
+    reset_counters();
+
+    avi_player_handle_t player = new_player_with_stack(512, true);
+    assert(avi_player_play_from_memory(player, avi, size) == ESP_OK);
+    assert(wait_for_count(&s_end_count, 1));
+    assert(atomic_load(&s_video_count) == 1);
+    assert(host_task_stats().internal_stack_reads == 0);
+    deinit_player(player);
 }
 
 int main(int argc, char **argv)
 {
     test_start_then_immediate_stop();
-    test_natural_end_then_deinit();
+    test_internal_stack_file_playback_then_deinit();
     test_pending_stop_then_deinit();
     test_header_larger_than_buffer_fails_closed();
     test_media_read_failure_closes_file();
+    test_psram_stack_memory_playback_then_deinit();
     if (argc == 2) {
         test_external_sd_fixture_header(argv[1]);
         test_external_sd_fixture_playback(argv[1]);

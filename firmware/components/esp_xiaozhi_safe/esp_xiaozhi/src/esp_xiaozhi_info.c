@@ -418,6 +418,9 @@ static esp_err_t esp_xiaozhi_chat_http_event(esp_http_client_event_t *evt)
         return ctx->result;
     case HTTP_EVENT_ON_FINISH:
         ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        /* Keep credentials and response contents out of diagnostic logs. */
+        ESP_LOGI(TAG, "Service response: HTTP %d, %zu bytes",
+                 esp_http_client_get_status_code(evt->client), ctx->output_len);
         if (ctx->result != ESP_OK) {
             return ctx->result;
         }

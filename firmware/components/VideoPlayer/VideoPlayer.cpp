@@ -914,7 +914,10 @@ void VideoPlayer::workerTask(void *arg)
             .coreID = APP_CPU_NUM,
             .user_data = self,
             .stack_size = 16 * 1024,
-            .stack_in_psram = true,
+            // AVI headers/frames come from the internal flash FAT volume.
+            // Flash reads temporarily disable the PSRAM cache, so this
+            // file-reading task must keep its stack in internal SRAM.
+            .stack_in_psram = false,
         };
         result = avi_player_init(config, &self->_avi);
     }

@@ -1,0 +1,2 @@
+# Synthetic WAV/JPEG/MJPEG fixtures used by the firmware build.
+Pillow==12.3.0

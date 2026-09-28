@@ -80,6 +80,11 @@ CONFIG_XIAOZHI_APP_UI_LANGUAGE_SIMPLIFIED_CHINESE=y
 CONFIG_XIAOZHI_APP_TRANSPORT_WEBSOCKET=y
 CONFIG_XIAOZHI_INFO_TIMEOUT_MS=8000
 
+# The connected TLS session otherwise consumes the internal heap needed by
+# Xiaozhi's 24 KB prompt stack and microphone task. Use the board's 8 MB PSRAM
+# for TLS allocations; retain full TLS record sizes and certificate validation.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
 # Keep network queues useful for streamed conversation audio without applying
 # the P4 reference's 32 MB-PSRAM-sized remote-Wi-Fi buffer profile.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8

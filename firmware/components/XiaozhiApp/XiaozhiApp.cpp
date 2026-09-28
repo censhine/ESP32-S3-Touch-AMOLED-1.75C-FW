@@ -664,6 +664,12 @@ void XiaozhiApp::setError(esp_err_t error, const char *source)
     ESP_UTILS_LOGE(
         "%s: %s", source ? source : "Xiaozhi", esp_err_to_name(error)
     );
+    ESP_UTILS_LOGW(
+        "Error memory: internal free=%u largest=%u, PSRAM free=%u",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM))
+    );
     if (_network_ready.load()) {
         setState(State::Error);
     }

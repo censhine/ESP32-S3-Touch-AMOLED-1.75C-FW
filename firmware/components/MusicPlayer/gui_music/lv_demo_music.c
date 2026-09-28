@@ -12,6 +12,7 @@
 
 #include "lv_demo_music_main.h"
 #include "lv_demo_music_list.h"
+#include "music_player_support.h"
 
 /*********************
  *      DEFINES
@@ -114,7 +115,6 @@ static uint32_t active_track_cnt;
 static file_iterator_instance_t *_file_iterator = NULL;
 static const char *artist_list_name = "Unknown Artist";
 static const char *genre_list_name = "Unknown Genre";
-static const uint32_t time_list_num = 1 * 60;
 
 /**********************
  *      MACROS
@@ -232,19 +232,23 @@ uint32_t lv_demo_music_get_track_length(uint32_t track_id)
 {
     if (_file_iterator == NULL)
     {
-        return time_list_num;
+        return 0;
     }
 
     if (track_id < active_track_cnt)
     {
-        return time_list_num;
+        char path[256];
+        int length = file_iterator_get_full_path_from_index(_file_iterator, track_id,
+                                                            path, sizeof(path));
+        return length > 0 && (size_t)length < sizeof(path) ?
+               music_wav_duration_seconds(path) : 0;
     }
     else if (track_id < active_track_cnt + sizeof(time_list) / sizeof(time_list[0]))
     {
         return time_list[track_id - active_track_cnt];
     }
 
-    return time_list_num;
+    return 0;
 }
 
 /**********************

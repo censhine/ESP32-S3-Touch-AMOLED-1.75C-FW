@@ -15,4 +15,4 @@ npx --yes lv_font_conv@1.5.3 --font assets/NotoSansSC-subset.ttf \
   --range 0x20-0x7e --no-compress -o assets/roundwing_font_30.c
 ```
 
-LVGL 9.5.0 来自 Espressif Component Registry，使用 MIT 许可证，许可证随依赖源文件保存在 `vendor/lvgl/LICENCE.txt`。SDL2 为 zlib 许可证，由 Homebrew 安装。
+LVGL 9.4.0 来自 Espressif Component Registry，使用 MIT 许可证，许可证随依赖源文件保存在 `vendor/lvgl/LICENCE.txt`。仓库内已复制的音乐示例另保留 `firmware/components/MusicPlayer/gui_music/LICENCE.txt`。SDL2 为 zlib 许可证，由 Homebrew 安装。

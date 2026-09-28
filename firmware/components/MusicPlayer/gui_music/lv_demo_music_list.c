@@ -50,6 +50,7 @@ static uint32_t page_index;
 static uint32_t page_first_track;
 static uint32_t page_track_count;
 static uint32_t selected_track_id;
+static bool selected_track_playing;
 static uint8_t page_previous_event;
 static uint8_t page_next_event;
 LV_IMAGE_DECLARE(img_lv_demo_music_btn_list_play);
@@ -140,13 +141,12 @@ lv_obj_t * lv_demo_music_list_create(lv_obj_t * parent)
     page_first_track = 0;
     page_track_count = 0;
     selected_track_id = 0;
+    selected_track_playing = false;
     render_page(0);
 
 #if APP_DEMO_MUSIC_ROUND
     lv_obj_set_scroll_snap_y(list, LV_SCROLL_SNAP_CENTER);
 #endif
-
-    lv_demo_music_list_button_check(0, true);
 
     return list;
 }
@@ -159,10 +159,13 @@ void lv_demo_music_list_button_check(uint32_t track_id, bool state)
 
     if(state) {
         selected_track_id = track_id;
+        selected_track_playing = true;
         const uint32_t requested_page = track_id / MUSIC_LIST_PAGE_SIZE;
         if(requested_page != page_index) {
             render_page(requested_page);
         }
+    } else if(track_id == selected_track_id) {
+        selected_track_playing = false;
     }
 
     if(track_id < page_first_track ||
@@ -196,7 +199,8 @@ static lv_obj_t * add_list_button(lv_obj_t * parent, uint32_t track_id)
 {
     uint32_t t = lv_demo_music_get_track_length(track_id);
     char time[32];
-    lv_snprintf(time, sizeof(time), "%"LV_PRIu32":%02"LV_PRIu32, t / 60, t % 60);
+    if(t != 0) lv_snprintf(time, sizeof(time), "%"LV_PRIu32":%02"LV_PRIu32, t / 60, t % 60);
+    else lv_snprintf(time, sizeof(time), "--:--");
     const char * title = lv_demo_music_get_title(track_id);
     const char * artist = lv_demo_music_get_artist(track_id);
 
@@ -317,7 +321,7 @@ static void render_page(uint32_t page)
         add_page_footer(list, page_count);
     }
 
-    if(selected_track_id >= page_first_track &&
+    if(selected_track_playing && selected_track_id >= page_first_track &&
        selected_track_id < page_first_track + page_track_count) {
         lv_obj_t * selected = lv_obj_get_child(list, selected_track_id - page_first_track);
         if(selected != NULL) {

@@ -1,6 +1,22 @@
 # 构建与媒体文件
 
-本机已准备 ESP-IDF 5.5.5、Python 3.12、Xtensa GCC 14.2、CMake/Ninja。SDK位于 `~/esp/esp-idf-v5.5.5`，工具位于 `~/esp/tools-v5.5.5`。
+已验证环境为 ESP-IDF 5.5.5、Python 3.12、Xtensa GCC 14.2、CMake/Ninja。以下是新 Mac 的安装步骤；已经安装 SDK 时，直接激活同一版本环境即可。
+
+```sh
+brew install python@3.12 cmake ninja sdl2
+export PATH="/opt/homebrew/opt/python@3.12/libexec/bin:$PATH"
+export IDF_TOOLS_PATH="$HOME/esp/tools-v5.5.5"
+mkdir -p "$HOME/esp"
+git clone --recursive --branch v5.5.5 https://github.com/espressif/esp-idf.git "$HOME/esp/esp-idf-v5.5.5"
+"$HOME/esp/esp-idf-v5.5.5/install.sh" esp32s3
+source "$HOME/esp/esp-idf-v5.5.5/export.sh"
+```
+
+回到本工程根目录，安装初始媒体生成所需的 Pillow；此命令使用上一步激活的 SDK Python 环境。
+
+```sh
+python -m pip install -r firmware/tools/requirements.txt
+```
 
 在工程根目录执行：
 
@@ -9,6 +25,8 @@
 ```
 
 此命令只编译，不访问设备。主程序、引导程序、分区表、WakeNet模型、SPIFFS字体资源及初始媒体镜像都在 `firmware/build/`。不要把旧的 Round Wing API 测试工程当成这里的整机固件。
+
+首次克隆或移动工程目录后，CMake 会自动更新 `firmware/dependencies.lock` 中 5 个随仓库提供的本地组件路径，保留注册表依赖的版本和校验值。直接执行 `idf.py -C firmware build` 也会运行这一步；无需删除锁文件或手动改路径。
 
 ## Mac游戏预览和测试
 
@@ -21,9 +39,22 @@ cmake --build build-native -j 8
 ctest --test-dir build-native --output-on-failure
 ./build-native/round-wing-preview
 python3 firmware/components/storage_service/tests/run_host_tests.py
+python3 firmware/components/MusicPlayer/tests/test_music_player_support.py
+python3 firmware/components/avi_player_safe/avi_player/tests/host/run_tests.py firmware/build/initial_media/video/color-test.avi
+python firmware/tools/tests/test_rebase_local_lock.py
 ```
 
 游戏主机测试使用和整机一致的LVGL 9.4.0。存储测试用主机桩检查服务的错误处理和并发逻辑，不能代替真实Flash/WL/FatFs测试。
+
+## 已迁移设备的应用更新
+
+设备已经使用本项目的分区表和资源时，只更新应用可执行：
+
+```sh
+idf.py -C firmware -p /dev/cu.usbmodem1101 app-flash
+```
+
+串口名称以实际连接为准。`app-flash` 仅写应用；首次从工厂固件迁移需要完整备份、分区与资源安装，参见[安装记录](DEVICE_INSTALL_ZH.md)。不要把普通 `flash` 当作只更新应用，它还会写入分区表、模型和 SPIFFS 资源。
 
 ## 内部媒体
 

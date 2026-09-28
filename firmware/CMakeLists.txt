@@ -20,6 +20,19 @@ add_compile_options(
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# The component manager validates locked absolute local paths before it can
+# resolve their manifests. Rebase only our bundled paths when a checkout moves.
+idf_build_get_property(LOCK_REBASE_PYTHON PYTHON)
+execute_process(
+    COMMAND "${LOCK_REBASE_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/tools/rebase_local_lock.py"
+        "${CMAKE_CURRENT_LIST_DIR}"
+    RESULT_VARIABLE LOCK_REBASE_RESULT
+)
+if(NOT LOCK_REBASE_RESULT EQUAL 0)
+    message(FATAL_ERROR "Could not rebase bundled component paths in dependencies.lock")
+endif()
+
 project(round-wing-1_75c-brookesia VERSION 0.1.0)
 
 # mcp-c-sdk 2.0.1 contains bounded strncpy calls that GCC 14 cannot prove are
