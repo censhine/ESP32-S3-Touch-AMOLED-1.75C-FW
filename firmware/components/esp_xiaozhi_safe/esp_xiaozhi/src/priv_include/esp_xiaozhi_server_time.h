@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <math.h>
 #include <stdbool.h>
 #include <sys/time.h>
 #include <time.h>
@@ -26,7 +27,12 @@ static inline bool esp_xiaozhi_server_time_parse(const cJSON *server_time, struc
     // Unix timestamps are UTC. timezone_offset is presentation metadata;
     // applying it here would make localtime apply the local offset twice.
     const double ts = timestamp->valuedouble;
-    tv->tv_sec = (time_t)(ts / 1000);
-    tv->tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;
+    // Restrict UTC dates to 1970 through 9999 before any integer conversion.
+    if (!isfinite(ts) || ts < 0 || ts >= 253402300800000.0) {
+        return false;
+    }
+    const long long milliseconds = (long long)ts;
+    tv->tv_sec = (time_t)(milliseconds / 1000);
+    tv->tv_usec = (suseconds_t)(milliseconds % 1000) * 1000;
     return true;
 }
