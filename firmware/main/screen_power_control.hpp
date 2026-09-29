@@ -14,4 +14,11 @@ namespace brookesia::screen_power {
 esp_err_t start(esp_lcd_panel_handle_t panel, lv_indev_t *touch,
                 esp_brookesia::systems::phone::Phone *phone);
 
+// All access is serialized by the LVGL lock, including the power worker.
+bool is_off();
+uint32_t off_duration_ms();
+esp_err_t sleep_panel_for_standby();
+bool needs_standby_recovery();
+bool wake_from_standby();
+
 } // namespace brookesia::screen_power

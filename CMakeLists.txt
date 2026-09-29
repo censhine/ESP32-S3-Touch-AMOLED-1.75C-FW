@@ -13,12 +13,35 @@ add_executable(power_button_tests tests/power_button_tests.cpp)
 target_include_directories(power_button_tests PRIVATE firmware/main)
 target_compile_options(power_button_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME power_button COMMAND power_button_tests)
+add_executable(app_idle_policy_tests tests/app_idle_policy_tests.cpp)
+target_include_directories(app_idle_policy_tests PRIVATE firmware/main)
+target_compile_options(app_idle_policy_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME app_idle_policy COMMAND app_idle_policy_tests)
+find_package(Threads REQUIRED)
+add_executable(system_status_standby_tests tests/system_status_standby_tests.cpp
+    firmware/components/system_status/system_status.cpp)
+target_include_directories(system_status_standby_tests PRIVATE
+    tests/support/system_status firmware/components/system_status/include)
+target_compile_options(system_status_standby_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-const-variable)
+target_link_libraries(system_status_standby_tests PRIVATE Threads::Threads)
+add_test(NAME system_status_standby COMMAND system_status_standby_tests)
+add_executable(power_manager_tests tests/power_manager_tests.cpp)
+target_include_directories(power_manager_tests PRIVATE
+    tests/support/power_manager firmware/main)
+target_compile_options(power_manager_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME power_manager_transaction COMMAND power_manager_tests)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME brookesia_lifecycle COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brookesia_lifecycle.py)
+set_tests_properties(brookesia_lifecycle PROPERTIES
+    ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}")
 add_executable(screen_power_tests tests/screen_power_tests.cpp firmware/main/screen_power_control.cpp)
 target_include_directories(screen_power_tests PRIVATE tests/support/screen_power firmware/main)
 target_compile_options(screen_power_tests PRIVATE -Wall -Wextra -Werror)
 foreach(scenario idle_boundary start_setup null_display touch_activity manual_off_on
         wake_window boot_activity power_activity button_test failed_manual_off
-        failed_wake failed_idle repeated_cycles tick_wrap)
+        failed_wake failed_idle repeated_cycles tick_wrap standby_wake)
     add_test(NAME screen_power_${scenario} COMMAND screen_power_tests ${scenario})
 endforeach()
 set(XIAOZHI_TIME_PRIVATE_DIR

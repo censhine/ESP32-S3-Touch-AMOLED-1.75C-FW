@@ -105,6 +105,10 @@ int Manager::uninstallApp(App *app)
     }
     ESP_UTILS_CHECK_FALSE_RETURN(it->second == app, false, "App(%d) is not installed", app_id);
 
+    if (_id_running_app_map.count(app_id) != 0) {
+        ESP_UTILS_CHECK_FALSE_RETURN(processAppClose(app), false, "App cleanup before uninstall failed");
+    }
+
     // Process display
     ESP_UTILS_CHECK_FALSE_RETURN(display.processAppUninstall(app), false, "Display process app uninstall failed");
 
@@ -217,11 +221,15 @@ bool Manager::startApp(int id)
     auto find_ret = _id_running_app_map.find(id);
     if (find_ret != _id_running_app_map.end()) {
         app = find_ret->second;
-        ESP_UTILS_LOGD("App(%d) is already running, just resume it", app->_id);
-        // If so, resume app
-        ESP_UTILS_CHECK_FALSE_RETURN(processAppResume(app), false, "Resume app failed");
-
-        return true;
+        if (!app->_flags.is_cleanup_pending && app->_close_stage == App::CloseStage::APP &&
+                (app->_status == App::Status::RUNNING || app->_status == App::Status::PAUSED)) {
+            ESP_UTILS_LOGD("App(%d) is already running, just resume it", app->_id);
+            ESP_UTILS_CHECK_FALSE_RETURN(processAppResume(app), false, "Resume app failed");
+            return true;
+        }
+        // Failed startup/close is still owned, but cannot be resumed. Finish
+        // its cleanup before allowing another runtime to be created.
+        ESP_UTILS_CHECK_FALSE_RETURN(processAppClose(app), false, "Pending app cleanup failed");
     }
 
     // If not, then find the target app from installed app map
@@ -242,35 +250,26 @@ bool Manager::startApp(int id)
         ESP_UTILS_CHECK_FALSE_RETURN(processAppClose(app_old), false, "Close app failed");
     }
 
-    // Start app
-    ESP_UTILS_CHECK_FALSE_RETURN(processAppRun(app), false, "Start app failed");
-
-    // Add app to running_app_map
-    ESP_UTILS_CHECK_FALSE_GOTO(_id_running_app_map.insert(pair <int, App *>(id, app)).second, err,
+    // Claim ownership before any worker or UI allocation. Failed startup keeps
+    // this entry until all normal STOP cleanup stages have succeeded.
+    ESP_UTILS_CHECK_FALSE_RETURN(_id_running_app_map.insert(pair <int, App *>(id, app)).second, false,
                                "Insert app to running map failed");
-
-    return true;
-
-err:
-    ESP_UTILS_CHECK_FALSE_RETURN(processAppClose(app), false, "Close app failed");
-
-    return false;
+    return processAppRun(app);
 }
 
 bool Manager::processAppRun(App *app)
 {
-    bool is_display_run = false;
-    bool is_app_run = false;
+    App *previous_active_app = _active_app;
     Display &display = _system_context.getDisplay();
 
     ESP_UTILS_CHECK_NULL_RETURN(app, false, "Invalid app");
     ESP_UTILS_LOGD("Process app(%d) run", app->_id);
 
     // Process display, and get the visual area of the app
-    ESP_UTILS_CHECK_FALSE_RETURN(is_display_run = display.processAppRun(app), false, "Process display before app run failed");
+    ESP_UTILS_CHECK_FALSE_GOTO(display.processAppRun(app), err, "Process display before app run failed");
 
     // Process app
-    ESP_UTILS_CHECK_FALSE_GOTO(is_app_run = app->processRun(), err, "Process app run failed");
+    ESP_UTILS_CHECK_FALSE_GOTO(app->processRun(), err, "Process app run failed");
 
     // Process extra
     ESP_UTILS_CHECK_FALSE_GOTO(processAppRunExtra(app), err, "Process app run extra failed");
@@ -281,13 +280,27 @@ bool Manager::processAppRun(App *app)
     return true;
 
 err:
-    if (is_display_run && !display.processAppClose(app)) {
-        ESP_UTILS_LOGE("Display process close failed");
+    // The failed app may have loaded its screen before run() failed. Use the
+    // normal active-app unload path without losing the previous app's runtime.
+    _active_app = app;
+    if (app->_status == App::Status::CLOSING) {
+        ESP_UTILS_LOGE("App cleanup incomplete; retaining app(%d) for STOP retry", app->_id);
+    } else if (!processAppClose(app)) {
+        ESP_UTILS_LOGE("App startup cleanup incomplete; retaining app(%d)", app->_id);
     }
-    if (is_app_run && !app->processClose(true)) {
-        ESP_UTILS_LOGE("App process close failed");
+    _active_app = previous_active_app;
+    if (previous_active_app != nullptr) {
+        // This start path never paused the previous runtime. Restore its view
+        // without invoking run/resume/close on that application.
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processAppResume(previous_active_app), false,
+                                     "Restore previous app display failed");
+        ESP_UTILS_CHECK_FALSE_RETURN(previous_active_app->loadRecentScreen(), false,
+                                     "Restore previous app screen failed");
+        ESP_UTILS_CHECK_FALSE_RETURN(processAppResumeExtra(previous_active_app), false,
+                                     "Restore previous app decorations failed");
+    } else {
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processMainScreenLoad(), false, "Display load main screen failed");
     }
-    ESP_UTILS_CHECK_FALSE_RETURN(display.processMainScreenLoad(), false, "Display load main screen failed");
 
     return false;
 }
@@ -297,6 +310,9 @@ bool Manager::processAppResume(App *app)
     Display &display = _system_context.getDisplay();
 
     ESP_UTILS_CHECK_NULL_RETURN(app, false, "Invalid app");
+    ESP_UTILS_CHECK_FALSE_RETURN(!app->_flags.is_cleanup_pending &&
+                                 app->_close_stage == App::CloseStage::APP, false,
+                                 "App cleanup is pending; resume is not allowed");
     ESP_UTILS_LOGD("Process app(%d) resume", app->_id);
 
     // Check if the screen is showing app and the app is not the active one
@@ -356,22 +372,43 @@ bool Manager::processAppClose(App *app)
     ESP_UTILS_CHECK_NULL_RETURN(app, false, "Invalid app");
     ESP_UTILS_LOGD("Process app(%d) close", app->_id);
 
-    // Process app, enable auto clean when the app is showing
-    ESP_UTILS_CHECK_FALSE_RETURN(app->processClose(_active_app == app), false, "App process close failed");
-    if (_core_data.flags.enable_app_save_snapshot) {
-        if (!releaseAppSnapshot(app)) {
-            ESP_UTILS_LOGE("Release app snapshot failed");
+    ESP_UTILS_CHECK_FALSE_RETURN(!app->_manager_close_in_progress, false,
+                                 "App close is already in progress");
+    app->_manager_close_in_progress = true;
+    app->_flags.is_cleanup_pending = true;
+    struct CloseGuard {
+        bool &in_progress;
+        ~CloseGuard() { in_progress = false; }
+    } close_guard{app->_manager_close_in_progress};
+
+    using CloseStage = App::CloseStage;
+    CloseStage &stage = app->_close_stage;
+    if (stage == CloseStage::APP) {
+        // App::processRun() may already have closed a failed runtime. CLOSED
+        // means only its display/manager cleanup remains; do not close it twice.
+        if (app->_status != App::Status::CLOSED) {
+            ESP_UTILS_CHECK_FALSE_RETURN(app->processClose(_active_app == app), false, "App process close failed");
         }
+        if (_core_data.flags.enable_app_save_snapshot) {
+            if (!releaseAppSnapshot(app)) {
+                ESP_UTILS_LOGE("Release app snapshot failed");
+            }
+        }
+        stage = CloseStage::DISPLAY;
     }
 
-    // Process display, load main screen if the app is showing
-    ESP_UTILS_CHECK_FALSE_RETURN(display.processAppClose(app), false, "Display process close failed");
+    if (stage == CloseStage::DISPLAY) {
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processAppClose(app), false, "Display process close failed");
+        stage = CloseStage::EXTRA;
+    }
 
     // Process extra
     ESP_UTILS_CHECK_FALSE_RETURN(processAppCloseExtra(app), false, "Process app pause extra failed");
 
     // Remove app from running map and update active app
     ESP_UTILS_CHECK_FALSE_RETURN(_id_running_app_map.erase(app->_id) > 0, false, "Remove app from running map failed");
+    app->_close_stage = CloseStage::APP;
+    app->_flags.is_cleanup_pending = false;
     if (_active_app == app) {
         _active_app = nullptr;
     }

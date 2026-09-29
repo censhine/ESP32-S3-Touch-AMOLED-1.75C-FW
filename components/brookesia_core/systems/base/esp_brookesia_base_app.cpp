@@ -378,6 +378,8 @@ bool App::processUninstall(void)
     _status = Status::UNINSTALLED;
     _id = -1;
     _flags = {};
+    _close_stage = CloseStage::APP;
+    _manager_close_in_progress = false;
     _display_style = {};
     _app_style = {};
     _resource_timer_count = 0;
@@ -408,6 +410,7 @@ bool App::processRun()
 
     ESP_UTILS_CHECK_FALSE_RETURN(checkInitialized(), false, "Not initialized");
     ESP_UTILS_LOGD("App(%s: %d) run", getName(), _id);
+    _flags.is_runtime_closed = true;
 
     // TODO
     // if (_flags.is_screen_small) {
@@ -422,11 +425,13 @@ bool App::processRun()
     }
     ESP_UTILS_CHECK_FALSE_RETURN(saveDisplayTheme(), false, "Save display theme failed");
     ESP_UTILS_LOGD("Do run");
+    _status = Status::STARTING;
+    _flags.is_runtime_closed = false;
     if (!run()) {
         ESP_UTILS_LOGE("Run app failed");
         ret = false;
     }
-    ESP_UTILS_CHECK_FALSE_RETURN(endRecordResource(), false, "Start record resource failed");
+    ESP_UTILS_CHECK_FALSE_GOTO(endRecordResource(), err, "End record resource failed");
     if (!saveRecentScreen(true)) {
         ESP_UTILS_LOGE("Save recent screen after run failed");
         ret = false;
@@ -498,12 +503,19 @@ bool App::processClose(bool is_app_active)
 {
     ESP_UTILS_CHECK_FALSE_RETURN(checkInitialized(), false, "Not initialized");
     ESP_UTILS_LOGD("App(%s: %d) close", getName(), _id);
+    _status = Status::CLOSING;
+    // Navigation may change _status later. Keep teardown intent sticky until
+    // the manager has also completed display and phone cleanup.
+    _flags.is_cleanup_pending = true;
 
     // Prevent recursive close
     _flags.is_closing = true;
 
     ESP_UTILS_LOGD("Do close");
-    ESP_UTILS_CHECK_FALSE_GOTO(close(), err, "Close failed");
+    if (!_flags.is_runtime_closed) {
+        ESP_UTILS_CHECK_FALSE_GOTO(close(), err, "Close failed");
+        _flags.is_runtime_closed = true;
+    }
     // Check if the app is active, if not, clean the resource immediately.
     // Otherwise, clean the resource when the screen is unloaded
     if (is_app_active) {

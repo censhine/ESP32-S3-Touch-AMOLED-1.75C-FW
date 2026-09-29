@@ -3,6 +3,7 @@ idf_component_register(
         "main.cpp"
         "display_perf_monitor.cpp"
         "screen_power_control.cpp"
+        "power_manager.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         round_wing
@@ -23,6 +24,7 @@ idf_component_register(
         chat_history
         storage_service
         system_status
+        esp_pm
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers)

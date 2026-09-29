@@ -222,8 +222,8 @@ bool SpecAnalyzer::run(void)
 {
     ESP_UTILS_LOGD("Run");
 
-    if (_worker_exit.load() || !_codec_released.load() ||
-        _codec_release_result.load() != ESP_OK) {
+    // A close joins the worker; Brookesia does not call init() again on reopen.
+    if (!init()) {
         ESP_UTILS_LOGE("Audio lifecycle is not ready for a new capture session");
         return false;
     }
@@ -321,7 +321,14 @@ bool SpecAnalyzer::close(void)
 {
     ESP_UTILS_LOGD("Close");
 
-    if (!pause()) {
+    (void)pause();
+    if (!stopAudioTask(pdMS_TO_TICKS(WORKER_JOIN_TIMEOUT_MS))) {
+        return false;
+    }
+    // Once the worker has exited, retry a failed codec hand-off here. Never
+    // report a successful close while a shared audio session remains owned.
+    if ((!_codec_released.load() || _codec_release_result.load() != ESP_OK) &&
+        !releaseCodec(CaptureState::Idle)) {
         return false;
     }
     destroyUi();
@@ -350,19 +357,7 @@ bool SpecAnalyzer::init()
 bool SpecAnalyzer::deinit()
 {
     ESP_UTILS_LOGD("Deinit");
-
-    const bool close_ok = close();
-    const bool worker_ok = stopAudioTask(pdMS_TO_TICKS(WORKER_JOIN_TIMEOUT_MS));
-
-    // An uninstall must not leave LVGL resources pointing at this app even if
-    // the codec reports a release failure. The worker never accesses the UI.
-    destroyUi();
-
-    const bool codec_ok = _codec_released.load() && _codec_release_result.load() == ESP_OK;
-    if (!close_ok && worker_ok && codec_ok) {
-        ESP_UTILS_LOGW("Initial close timed out, but deinit completed the codec hand-off");
-    }
-    return worker_ok && codec_ok;
+    return close();
 }
 bool SpecAnalyzer::pause()
 {

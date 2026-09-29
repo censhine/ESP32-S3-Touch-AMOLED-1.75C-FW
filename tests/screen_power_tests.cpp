@@ -293,6 +293,60 @@ void test_tick_wrap() {
     poll(woke + 120000U);
     require_off();
 }
+void test_standby_wake() {
+    start();
+    require(brookesia::screen_power::sleep_panel_for_standby() == ESP_ERR_INVALID_STATE,
+            "cannot put a lit display into panel standby");
+    require(!brookesia::screen_power::is_off(), "controller reports lit screen");
+    power_click();
+    const auto off_at = state.now;
+    advance(5000);
+    require(brookesia::screen_power::is_off(), "controller reports dark screen");
+    require(brookesia::screen_power::off_duration_ms() == state.now - off_at,
+            "standby settling starts at the actual display-off transition");
+    state.brightness = 73;
+    require(brookesia::screen_power::sleep_panel_for_standby() == ESP_OK, "dark panel can sleep");
+    require(state.panel_sleeping && brookesia::screen_power::needs_standby_recovery(),
+            "panel sleep is tracked separately from display blanking");
+    state.sleep_result = ESP_FAIL;
+    require(!brookesia::screen_power::wake_from_standby(), "failed sleep-out preserves recovery state");
+    require_off();
+    state.sleep_result = ESP_OK;
+    state.brightness_result = ESP_FAIL;
+    require(!brookesia::screen_power::wake_from_standby(), "failed brightness restore keeps screen dark");
+    require(brookesia::screen_power::needs_standby_recovery(), "brightness failure remains retryable");
+    require_off();
+    state.brightness_result = ESP_OK;
+    state.panel_result = ESP_FAIL;
+    require(!brookesia::screen_power::wake_from_standby(), "DISPON failure does not claim successful wake");
+    require(brookesia::screen_power::needs_standby_recovery(), "DISPON failure retains worker recovery marker");
+    require_off();
+    state.panel_result = ESP_OK;
+    state.gpio[3] = 1;
+    require(brookesia::screen_power::wake_from_standby(), "GPIO wake restores display");
+    require_on();
+    require(state.brightness == 73 && !state.panel_sleeping &&
+            !brookesia::screen_power::needs_standby_recovery(), "wake restores saved brightness and panel state");
+    advance(50);
+    state.gpio[3] = 0;
+    advance(20);
+    advance(40);
+    require_on();
+    require(state.panel_commands == 3, "wake press release cannot blank the screen again");
+    power_click();
+    require_off();
+    require(state.panel_commands == 4, "next deliberate press still blanks display");
+    state.sleep_result = ESP_FAIL;
+    require(brookesia::screen_power::sleep_panel_for_standby() == ESP_FAIL,
+            "failed panel sleep returns driver error");
+    require(brookesia::screen_power::needs_standby_recovery(), "partial sleep command failure requires recovery");
+    state.sleep_result = ESP_OK;
+    // Wake processing may occur after a very short press was already released.
+    require(brookesia::screen_power::wake_from_standby(), "already released wake is accepted");
+    advance(40);
+    require_on();
+    require(brookesia::screen_power::off_duration_ms() == 0, "lit screen has no dark duration");
+}
 }
 
 int main(int argc, char **argv) {
@@ -311,6 +365,7 @@ int main(int argc, char **argv) {
     else if (scenario == "failed_idle") test_failed_idle();
     else if (scenario == "repeated_cycles") test_repeated_cycles();
     else if (scenario == "tick_wrap") test_tick_wrap();
+    else if (scenario == "standby_wake") test_standby_wake();
     else { std::cerr << "Unknown scenario\n"; return 2; }
     std::cout << "PASS: " << scenario << " (" << checks << " checks)\n";
 }

@@ -203,6 +203,7 @@ bool Manager::processAppResumeExtra(base::App *app)
 bool Manager::processAppCloseExtra(base::App *app)
 {
     App *phone_app = static_cast<App *>(app);
+    RecentsScreen *recents_screen = display.getRecentsScreen();
 
     ESP_UTILS_CHECK_NULL_RETURN(phone_app, false, "Invalid phone app");
     ESP_UTILS_LOGD("Process app(%p) close extra", phone_app);
@@ -212,10 +213,53 @@ bool Manager::processAppCloseExtra(base::App *app)
         ESP_UTILS_CHECK_FALSE_RETURN(processDisplayScreenChange(Screen::MAIN, nullptr), false,
                                      "Process screen change failed");
         // If the recents_screen is visible, change back to the recents_screen
-        if (display.getRecentsScreen()->checkVisible()) {
+        if (recents_screen != nullptr && recents_screen->checkVisible()) {
             ESP_UTILS_CHECK_FALSE_RETURN(processDisplayScreenChange(Screen::RECENTS_SCREEN, nullptr), false,
                                          "Process screen change failed");
         }
+    }
+
+    // This hook runs after the app and display have closed successfully, but
+    // before the base manager erases the app from its running map. External
+    // STOP events (including idle cleanup) do not pass through the recents
+    // gesture callback, so retire its saved references here as well.
+    base::App *next_recents_app = nullptr;
+    const bool selected_app_closed = _recents_screen_active_app == app;
+    if (selected_app_closed && recents_screen != nullptr) {
+        for (uint8_t i = 0; i < getRunningAppCount(); ++i) {
+            base::App *candidate = getRunningAppByIdenx(i);
+            if (candidate != nullptr && candidate != app &&
+                    recents_screen->checkSnapshotExist(candidate->getId())) {
+                next_recents_app = candidate;
+                break;
+            }
+        }
+        if (recents_screen->checkVisible() && next_recents_app != nullptr) {
+            ESP_UTILS_CHECK_FALSE_RETURN(
+                recents_screen->scrollToSnapshotById(next_recents_app->getId()), false,
+                "Scroll to remaining app snapshot failed");
+        }
+    }
+    if (recents_screen != nullptr && recents_screen->checkVisible() &&
+            recents_screen->getSnapshotCount() == 0 &&
+            data.flags.enable_recents_screen_hide_when_no_snapshot) {
+        ESP_UTILS_CHECK_FALSE_RETURN(recents_screen->setVisible(false), false,
+                                     "Hide empty recents screen failed");
+        ESP_UTILS_CHECK_FALSE_RETURN(processDisplayScreenChange(Screen::MAIN, nullptr), false,
+                                     "Load main screen after last app close failed");
+    }
+
+    // Commit only after all fallible close work, leaving failed closes tracked
+    // for retry. In particular, a tap outside the cards must never relaunch a
+    // paused app which has already been reclaimed.
+    if (_recents_screen_pause_app == app) {
+        _recents_screen_pause_app = nullptr;
+    }
+    if (selected_app_closed) {
+        _recents_screen_active_app = next_recents_app;
+        _flags.is_recents_screen_pressed = false;
+        _flags.is_recents_screen_snapshot_move_hor = false;
+        _flags.is_recents_screen_snapshot_move_ver = false;
     }
 
     return true;

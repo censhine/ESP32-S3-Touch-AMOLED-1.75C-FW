@@ -68,7 +68,7 @@ private:
     );
     void releaseUi();
     void workerLoop();
-    void stopWorker();
+    bool stopWorker();
 
     bool _pwr_configured = false;
     bool _boot_configured = false;

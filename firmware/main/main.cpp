@@ -33,6 +33,7 @@
 #include "display_perf_monitor.hpp"
 #include "esp_brookesia_app_calculator.hpp"
 #include "screen_power_control.hpp"
+#include "power_manager.hpp"
 #include "storage_service.h"
 #include "system_status.hpp"
 
@@ -774,6 +775,10 @@ extern "C" void app_main(void)
         if (power_result != ESP_OK) {
             ESP_UTILS_LOGW("POWER screen control unavailable: %s", esp_err_to_name(power_result));
         }
+    }
+    const esp_err_t standby_result = brookesia::power::start(panel, display, phone);
+    if (standby_result != ESP_OK) {
+        ESP_UTILS_LOGW("Power management unavailable: %s", esp_err_to_name(standby_result));
     }
     ESP_UTILS_LOGI("Brookesia firmware is ready");
 }

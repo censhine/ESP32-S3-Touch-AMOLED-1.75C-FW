@@ -44,6 +44,9 @@ protected:
     bool resume() override;
 
 private:
+    bool startRuntime();
+    bool stopRuntime();
+
     enum class State : uint8_t {
         NetworkRequired,
         Preparing,

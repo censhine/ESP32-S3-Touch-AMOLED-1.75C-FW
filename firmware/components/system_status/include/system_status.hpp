@@ -49,6 +49,17 @@ esp_err_t start(
 
 esp_err_t stop();
 
+/**
+ * Temporarily suspend status polling and Wi-Fi for system light sleep.
+ *
+ * Entry waits for the monitor to finish its current I2C/UI work and stops the
+ * radio. The saved Wi-Fi switch and credentials remain unchanged; exit restores
+ * the desired radio state and reconnect policy. Wi-Fi configuration APIs reject
+ * requests during standby. Call from a separate task without the LVGL lock.
+ * Entry failure rolls back the suspension, so the caller must not sleep then.
+ */
+esp_err_t set_standby(bool standby);
+
 /** Return the most recent hardware snapshot. */
 bool get_snapshot(Snapshot &snapshot);
 

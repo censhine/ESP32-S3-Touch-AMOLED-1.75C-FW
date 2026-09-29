@@ -56,7 +56,7 @@ private:
     void layoutUi();
     void updateUi();
     void releaseUi();
-    void stopWorker();
+    bool stopWorker();
     void constrainPosition(int &x, int &y) const;
 
     qmi8658_dev_t _imu = {};

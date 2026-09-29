@@ -133,7 +133,11 @@ bool StatusBar::removeIcon(int id)
     ESP_UTILS_CHECK_FALSE_RETURN(checkMainInitialized(), false, "Not initialized");
 
     auto ret = _id_icon_map.find(id);
-    ESP_UTILS_CHECK_FALSE_RETURN(ret != _id_icon_map.end(), false, "Icon id not found");
+    // Startup can fail before the icon is created, or a later close stage can
+    // fail after it was removed. Both paths must be safely retryable.
+    if (ret == _id_icon_map.end()) {
+        return true;
+    }
 
     int num = _id_icon_map.erase(id);
     ESP_UTILS_CHECK_FALSE_RETURN(num > 0, false, "Erase icon failed");

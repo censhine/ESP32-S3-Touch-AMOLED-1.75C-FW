@@ -277,6 +277,22 @@ static esp_err_t bsp_audio_delete_i2s_channel(i2s_chan_handle_t *channel)
     return ret;
 }
 
+esp_err_t bsp_audio_suspend(void)
+{
+    esp_err_t result = ESP_OK;
+    const i2s_chan_handle_t channels[] = {i2s_rx_chan, i2s_tx_chan};
+    for (size_t i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i) {
+        if (channels[i] == NULL) {
+            continue;
+        }
+        const esp_err_t err = i2s_channel_disable(channels[i]);
+        if (err != ESP_ERR_INVALID_STATE) {
+            bsp_audio_update_result(&result, err);
+        }
+    }
+    return result;
+}
+
 esp_err_t bsp_audio_deinit(void)
 {
     esp_err_t ret = ESP_OK;

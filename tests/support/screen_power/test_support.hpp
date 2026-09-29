@@ -65,6 +65,10 @@ struct State {
     esp_err_t gpio_result = ESP_OK;
     esp_err_t panel_result = ESP_OK;
     bool panel_on = true;
+    bool panel_sleeping = false;
+    int brightness = 55;
+    esp_err_t sleep_result = ESP_OK;
+    esp_err_t brightness_result = ESP_OK;
     int panel_commands = 0;
     int timer_creates = 0;
     int touch_resets = 0;
@@ -165,6 +169,20 @@ inline esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t, bool on) {
     if (s.panel_result != ESP_OK) return s.panel_result;
     s.panel_on = on;
     screen_power_test::record(on ? screen_power_test::PanelOn : screen_power_test::PanelOff);
+    return ESP_OK;
+}
+inline esp_err_t esp_lcd_panel_disp_sleep(esp_lcd_panel_handle_t, bool sleep) {
+    auto &s = screen_power_test::state;
+    if (s.sleep_result != ESP_OK) return s.sleep_result;
+    s.panel_sleeping = sleep;
+    if (!sleep) s.brightness = 0; // CO5300 reset/init restores a dark default.
+    return ESP_OK;
+}
+inline int bsp_display_brightness_get() { return screen_power_test::state.brightness; }
+inline esp_err_t bsp_display_brightness_set(int brightness) {
+    auto &s = screen_power_test::state;
+    if (s.brightness_result != ESP_OK) return s.brightness_result;
+    s.brightness = brightness;
     return ESP_OK;
 }
 inline std::size_t heap_caps_get_free_size(unsigned) { ++screen_power_test::state.heap_free_queries; return 65536; }

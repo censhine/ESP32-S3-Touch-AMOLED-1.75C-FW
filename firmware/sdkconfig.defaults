@@ -18,6 +18,11 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
 
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# Explicit GPIO-wake light sleep is coordinated by the power manager. DFS lets
+# idle CPU cycles run at 80 MHz; automatic sleep remains disabled at runtime.
+CONFIG_PM_ENABLE=y
+# The standby POWER latch disables its level interrupt from an IRAM ISR.
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
 # Brookesia installs fourteen applications and initializes the display/audio BSP
 # from app_main. The ESP-IDF default 3584-byte main stack overflows during
 # CO5300/LVGL bring-up; use the proven Brookesia speaker profile.

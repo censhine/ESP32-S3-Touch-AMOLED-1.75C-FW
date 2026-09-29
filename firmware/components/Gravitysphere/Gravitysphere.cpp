@@ -46,7 +46,9 @@ Gravitysphere::Gravitysphere(bool use_status_bar, bool use_navigation_bar)
 
 Gravitysphere::~Gravitysphere()
 {
-    stopWorker();
+    while (!stopWorker()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 bool Gravitysphere::init()
@@ -84,7 +86,9 @@ bool Gravitysphere::init()
 
 bool Gravitysphere::deinit()
 {
-    stopWorker();
+    if (!stopWorker()) {
+        return false;
+    }
     releaseUi();
     _imu_initialized = false;
     return true;
@@ -131,7 +135,9 @@ bool Gravitysphere::back()
 
 bool Gravitysphere::close()
 {
-    stopWorker();
+    if (!stopWorker()) {
+        return false;
+    }
     releaseUi();
     return true;
 }
@@ -572,12 +578,12 @@ void Gravitysphere::releaseUi()
     _displayed_progress = -1;
 }
 
-void Gravitysphere::stopWorker()
+bool Gravitysphere::stopWorker()
 {
     _running.store(false);
     TaskHandle_t task = _worker_task.load();
     if (task == nullptr) {
-        return;
+        return true;
     }
 
     xTaskNotifyGive(task);
@@ -588,11 +594,13 @@ void Gravitysphere::stopWorker()
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    task = _worker_task.exchange(nullptr);
-    if (task != nullptr) {
-        ESP_UTILS_LOGE("Gravitysphere worker exceeded bounded I2C shutdown time; deleting it");
-        vTaskDelete(task);
+    if (_worker_task.load() != nullptr) {
+        // The worker may still own the shared I2C bus. Retain its handle and
+        // resources so a later close can finish without killing a lock owner.
+        ESP_UTILS_LOGE("Gravitysphere worker exceeded bounded I2C shutdown time");
+        return false;
     }
+    return true;
 }
 
 ESP_UTILS_REGISTER_PLUGIN_WITH_CONSTRUCTOR(systems::base::App, Gravitysphere, APP_NAME, []() {

@@ -129,7 +129,9 @@ ButtonTest::ButtonTest()
 
 ButtonTest::~ButtonTest()
 {
-    stopWorker();
+    while (!stopWorker()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 bool ButtonTest::init()
@@ -141,7 +143,9 @@ bool ButtonTest::init()
 
 bool ButtonTest::deinit()
 {
-    stopWorker();
+    if (!stopWorker()) {
+        return false;
+    }
     releaseUi();
     return true;
 }
@@ -193,7 +197,9 @@ bool ButtonTest::back()
 
 bool ButtonTest::close()
 {
-    stopWorker();
+    if (!stopWorker()) {
+        return false;
+    }
     releaseUi();
     return true;
 }
@@ -526,12 +532,12 @@ void ButtonTest::releaseUi()
     _warning_label = nullptr;
 }
 
-void ButtonTest::stopWorker()
+bool ButtonTest::stopWorker()
 {
     _running.store(false);
     TaskHandle_t task = _worker_task.load();
     if (task == nullptr) {
-        return;
+        return true;
     }
 
     xTaskNotifyGive(task);
@@ -543,7 +549,9 @@ void ButtonTest::stopWorker()
         // The worker never touches LVGL and owns its self-delete path. Leaving
         // it to finish avoids racing vTaskDelete() against natural task exit.
         ESP_UTILS_LOGW("Button Test worker did not exit within the wait period");
+        return false;
     }
+    return true;
 }
 
 ESP_UTILS_REGISTER_PLUGIN_WITH_CONSTRUCTOR(systems::base::App, ButtonTest, APP_NAME, []() {

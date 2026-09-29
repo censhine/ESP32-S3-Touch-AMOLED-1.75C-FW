@@ -80,6 +80,8 @@ public:
         RUNNING,
         PAUSED,
         CLOSED,
+        STARTING,
+        CLOSING,
     };
 
     using Registry = esp_utils::PluginRegistry<App>;
@@ -435,10 +437,16 @@ private:
     Config _init_config = {};
     Config _active_config = {};
     Status _status = Status::UNINSTALLED;
+    // Fixed storage lets low-memory teardown retry without allocating nodes.
+    enum class CloseStage { APP, DISPLAY, EXTRA };
+    CloseStage _close_stage = CloseStage::APP;
+    bool _manager_close_in_progress = false;
     // Attributes
     int _id = APP_ID_MIN - 1;
     struct {
         uint8_t is_closing: 1;
+        uint8_t is_runtime_closed: 1;
+        uint8_t is_cleanup_pending: 1;
         uint8_t is_screen_small: 1;
         uint8_t is_resource_recording: 1;
     } _flags = {};

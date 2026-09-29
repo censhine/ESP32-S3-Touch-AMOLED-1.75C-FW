@@ -257,54 +257,41 @@ XiaozhiApp::~XiaozhiApp()
 
 bool XiaozhiApp::run()
 {
+    if (!startRuntime()) {
+        // Partial allocation and a previous timed-out shutdown must remain
+        // recoverable without uninstalling the process-lifetime app object.
+        (void)stopRuntime();
+        return false;
+    }
     _ready_prompt_played.store(false);
     createUi();
     _visible.store(true);
     updateNetworkState();
     ControlEvent event = {};
     event.type = ControlEventType::AppVisible;
-    postControlEvent(event);
-    return true;
+    return postControlEvent(event);
 }
 
 bool XiaozhiApp::back()
 {
-    _visible.store(false);
-    if (_activation_prompt) {
-        _activation_prompt->cancel();
-    }
-    if (_activation_client) {
-        _activation_client->cancel();
-    }
-    ControlEvent event = {};
-    event.type = ControlEventType::AppHidden;
-    event.flag = true;
-    if (!postControlEvent(event, true)) {
-        return false;
-    }
     return notifyCoreClosed();
 }
 
 bool XiaozhiApp::close()
 {
-    _visible.store(false);
-    if (_activation_prompt) {
-        _activation_prompt->cancel();
-    }
-    if (_activation_client) {
-        _activation_client->cancel();
-    }
-    ControlEvent event = {};
-    event.type = ControlEventType::AppHidden;
-    event.flag = true;
-    if (!postControlEvent(event, true)) {
-        return false;
-    }
-    destroyUi();
-    return true;
+    // Closing releases the transport, control task, audio workers and queues.
+    // Merely hiding the app intentionally retains its runtime for quick resume.
+    return stopRuntime();
 }
 
 bool XiaozhiApp::init()
+{
+    // Brookesia calls init() at installation, not on each run. Allocate the
+    // heavy runtime only when the app opens and rebuild it after each close.
+    return _lifecycle_mutex != nullptr;
+}
+
+bool XiaozhiApp::startRuntime()
 {
     ScopedLifecycleAdmission lifecycle_user(_lifecycle_refs);
     if (!lifecycle_user) {
@@ -322,6 +309,9 @@ bool XiaozhiApp::init()
     }
     if (_destroying.load() || _deinit_in_progress.load() ||
             (!deinit_was_complete && _deinit_complete.load())) {
+        return false;
+    }
+    if (_shutdown.load() && !_deinit_complete.load()) {
         return false;
     }
     if (_control_running.load()) {
@@ -412,6 +402,11 @@ bool XiaozhiApp::init()
 
 bool XiaozhiApp::deinit()
 {
+    return stopRuntime();
+}
+
+bool XiaozhiApp::stopRuntime()
+{
     ScopedLifecycleAdmission lifecycle_user(_lifecycle_refs);
     if (!lifecycle_user) {
         return false;
@@ -481,6 +476,13 @@ bool XiaozhiApp::deinit()
     }
     if (!control_stopped) {
         ESP_UTILS_LOGE("Xiaozhi control task did not stop cleanly");
+        return finish_deinit(false);
+    }
+    // The activation prompt has separate codec ownership. Its destructor
+    // waits indefinitely after a failed hand-off, so retain it for a later
+    // close instead of entering that destructor while holding the GUI lock.
+    if (_activation_prompt && !_activation_prompt->stopAndWait(1000)) {
+        ESP_UTILS_LOGE("Xiaozhi activation prompt did not release its audio session");
         return finish_deinit(false);
     }
     if (_ip_event_instance) {
@@ -580,6 +582,9 @@ bool XiaozhiApp::pause()
 
 bool XiaozhiApp::resume()
 {
+    if (_shutdown.load() || _deinit_in_progress.load() || !_control_running.load()) {
+        return false;
+    }
     if (!_page_root) {
         createUi();
     }
@@ -593,8 +598,7 @@ bool XiaozhiApp::resume()
     updateNetworkState();
     ControlEvent event = {};
     event.type = ControlEventType::AppVisible;
-    postControlEvent(event);
-    return true;
+    return postControlEvent(event);
 }
 
 void XiaozhiApp::createUi()
@@ -2001,8 +2005,9 @@ bool XiaozhiApp::shutdownAudio()
     _input_task = nullptr;
     _encoder_task = nullptr;
     _playback_task = nullptr;
-    if (_audio_processor) {
-        _audio_processor->shutdown();
+    if (_audio_processor && !_audio_processor->shutdown()) {
+        ESP_UTILS_LOGE("Xiaozhi audio processor did not stop cleanly");
+        return false;
     }
     if (_opus_encoder) {
         esp_opus_enc_close(_opus_encoder);

@@ -169,6 +169,16 @@ esp_err_t bsp_audio_init_tx_std_rx_tdm(const i2s_std_config_t *tx_config,
                                        const i2s_tdm_config_t *rx_config);
 
 /**
+ * Stop both I2S channels without deleting their handles.
+ *
+ * Stop all audio users and close their codec devices first. This also disables
+ * a channel enabled during BSP initialization but never opened by a codec.
+ * Calling repeatedly is safe. The codec format/open APIs restart needed
+ * channels when an audio application next acquires the audio session.
+ */
+esp_err_t bsp_audio_suspend(void);
+
+/**
  * @brief Initialize the board voice profile.
  *
  * The physical profile is 24 kHz, 16-bit stereo STD TX plus four-slot TDM RX,

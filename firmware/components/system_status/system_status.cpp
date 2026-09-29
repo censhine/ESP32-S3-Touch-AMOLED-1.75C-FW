@@ -209,6 +209,8 @@ public:
         _wifi_event_connected.store(false);
         _wifi_reconnect_requested.store(false);
         _manual_wifi_configuration.store(false);
+        _standby.store(false);
+        _standby_acknowledged.store(false);
         _battery_error_streak = 0;
         _last_battery_error = ESP_OK;
 
@@ -269,6 +271,7 @@ public:
         // task is deliberately allowed to finish any bounded I2C transaction;
         // deleting it while the shared BSP bus is locked can corrupt the bus.
         unregisterEventHandlers();
+        notifyTask();
 
         const TickType_t poll_delay = pdMS_TO_TICKS(10);
         const unsigned poll_count = MONITOR_STOP_TIMEOUT_MS / 10;
@@ -287,6 +290,60 @@ public:
         return ESP_OK;
     }
 
+    esp_err_t setStandby(bool standby)
+    {
+        SemaphoreLock api_lock(_api_mutex);
+        if (!api_lock.isLocked() || !_running.load()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (_standby.load() == standby) {
+            return ESP_OK;
+        }
+
+        esp_err_t result = ESP_OK;
+        {
+            SemaphoreLock wifi_lock(_wifi_mutex);
+            if (!wifi_lock.isLocked()) {
+                return ESP_FAIL;
+            }
+            _standby_acknowledged.store(false);
+            _standby.store(standby);
+            result = applyWifiEnabledState(standby ? false : _wifi_enabled.load());
+            if (standby) {
+                portENTER_CRITICAL(&_snapshot_lock);
+                _snapshot.wifi_connected = false;
+                _snapshot.wifi_rssi = -127;
+                portEXIT_CRITICAL(&_snapshot_lock);
+            }
+        }
+        notifyTask();
+
+        if (standby && result == ESP_OK) {
+            // Acknowledgement is sent only between monitor iterations, after
+            // the current I2C transaction and status-bar update have finished.
+            const unsigned poll_count = MONITOR_STOP_TIMEOUT_MS / 10;
+            for (unsigned i = 0; i < poll_count && !_standby_acknowledged.load(); ++i) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (!_standby_acknowledged.load()) {
+                result = ESP_ERR_TIMEOUT;
+            }
+        }
+        if (standby && result != ESP_OK) {
+            SemaphoreLock wifi_lock(_wifi_mutex);
+            _standby.store(false);
+            _standby_acknowledged.store(false);
+            if (wifi_lock.isLocked()) {
+                const esp_err_t rollback = applyWifiEnabledState(_wifi_enabled.load());
+                if (rollback != ESP_OK) {
+                    ESP_LOGW(TAG, "Restore Wi-Fi after standby failure: %s", esp_err_to_name(rollback));
+                }
+            }
+            notifyTask();
+        }
+        return result;
+    }
+
     bool getSnapshot(Snapshot &snapshot)
     {
         portENTER_CRITICAL(&_snapshot_lock);
@@ -301,7 +358,7 @@ public:
         if (!api_lock.isLocked()) {
             return ESP_ERR_INVALID_STATE;
         }
-        if (!_running.load()) {
+        if (!_running.load() || _standby.load()) {
             return ESP_ERR_INVALID_STATE;
         }
         SemaphoreLock wifi_lock(_wifi_mutex);
@@ -344,7 +401,7 @@ public:
         if (!api_lock.isLocked()) {
             return ESP_ERR_INVALID_STATE;
         }
-        if (!_running.load() || !_wifi_enabled.load()) {
+        if (!_running.load() || _standby.load() || !_wifi_enabled.load()) {
             return ESP_ERR_INVALID_STATE;
         }
         SemaphoreLock wifi_lock(_wifi_mutex);
@@ -382,7 +439,7 @@ public:
         if (!api_lock.isLocked()) {
             return ESP_ERR_INVALID_STATE;
         }
-        if (!_running.load() || !_wifi_enabled.load()) {
+        if (!_running.load() || _standby.load() || !_wifi_enabled.load()) {
             return ESP_ERR_INVALID_STATE;
         }
         SemaphoreLock wifi_lock(_wifi_mutex);
@@ -394,6 +451,14 @@ public:
     }
 
 private:
+    void notifyTask() const
+    {
+        const TaskHandle_t task = _task.load();
+        if (task != nullptr) {
+            xTaskNotifyGive(task);
+        }
+    }
+
     static void taskEntry(void *arg)
     {
         static_cast<Monitor *>(arg)->taskLoop();
@@ -413,7 +478,7 @@ private:
             switch (event_id) {
             case WIFI_EVENT_STA_START:
                 monitor->_wifi_started.store(true);
-                if (monitor->_wifi_enabled.load()) {
+                if (monitor->_wifi_enabled.load() && !monitor->_standby.load()) {
                     monitor->_wifi_reconnect_requested.store(true);
                 }
                 break;
@@ -423,7 +488,7 @@ private:
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
                 monitor->_wifi_event_connected.store(false);
-                if (monitor->_wifi_enabled.load() &&
+                if (monitor->_wifi_enabled.load() && !monitor->_standby.load() &&
                         !monitor->_manual_wifi_configuration.load()) {
                     monitor->_wifi_reconnect_requested.store(true);
                 }
@@ -450,6 +515,12 @@ private:
     void taskLoop()
     {
         while (_running.load()) {
+            if (_standby.load()) {
+                _standby_acknowledged.store(true);
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+                continue;
+            }
+            _standby_acknowledged.store(false);
             Snapshot next = {};
             next.battery_percent = -1;
             next.wifi_enabled = _wifi_enabled.load();
@@ -515,6 +586,9 @@ private:
                 if (!wifi_lock.isLocked() || !_running.load()) {
                     break;
                 }
+                if (_standby.load()) {
+                    continue;
+                }
 
                 // Re-read the desired state while holding the same lock used
                 // by the UI APIs. This prevents a stale monitor iteration from
@@ -562,7 +636,7 @@ private:
 
             updateStatusBar(next);
             if (_running.load()) {
-                vTaskDelay(pdMS_TO_TICKS(_refresh_period_ms));
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(_refresh_period_ms));
             }
         }
 
@@ -851,7 +925,7 @@ private:
 
     void serviceWifiReconnect()
     {
-        if (!_wifi_enabled.load() || !_wifi_started.load() ||
+        if (_standby.load() || !_wifi_enabled.load() || !_wifi_started.load() ||
                 _manual_wifi_configuration.load() ||
                 !_wifi_reconnect_requested.exchange(false)) {
             return;
@@ -874,19 +948,22 @@ private:
 
     void updateStatusBar(const Snapshot &snapshot) const
     {
-        if (_status_bar == nullptr || !_running.load()) {
+        if (_status_bar == nullptr || !_running.load() || _standby.load()) {
             return;
         }
 
         // This monitor task does not own the LVGL lock (or the Wi-Fi mutex) on
         // entry.  Wait until the LVGL worker completes its current frame rather
         // than emitting a timeout every refresh cycle during an expensive draw.
-        // stop() is not called from an LVGL callback in this firmware.
+        // Short waits allow standby/stop to finish even if a GUI callback is
+        // waiting for the API mutex held by the shutdown worker.
         auto &gui_lock = esp_brookesia::gui::LvLock::getInstance();
-        if (!gui_lock.lock(-1)) {
-            return;
+        while (!gui_lock.lock(1000)) {
+            if (!_running.load() || _standby.load()) {
+                return;
+            }
         }
-        if (!_running.load()) {
+        if (!_running.load() || _standby.load()) {
             gui_lock.unlock();
             return;
         }
@@ -944,6 +1021,8 @@ private:
     SemaphoreHandle_t _wifi_mutex = nullptr;
     std::atomic<TaskHandle_t> _task = nullptr;
     std::atomic<bool> _running = false;
+    std::atomic<bool> _standby = false;
+    std::atomic<bool> _standby_acknowledged = false;
     std::atomic<bool> _wifi_enabled = false;
     std::atomic<bool> _wifi_started = false;
     std::atomic<bool> _wifi_event_connected = false;
@@ -977,6 +1056,11 @@ esp_err_t start(StatusBar *status_bar, uint32_t refresh_period_ms)
 esp_err_t stop()
 {
     return monitor().stop();
+}
+
+esp_err_t set_standby(bool standby)
+{
+    return monitor().setStandby(standby);
 }
 
 bool get_snapshot(Snapshot &snapshot)

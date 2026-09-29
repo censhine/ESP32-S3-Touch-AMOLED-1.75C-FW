@@ -25,6 +25,9 @@ struct Control {
     lv_timer_t *timer = nullptr;
     ShortPressButton button;
     bool screen_off = false;
+    uint32_t off_since_ms = 0;
+    bool panel_needs_recovery = false;
+    int saved_brightness = 0;
     bool power_was_pressed = false;
     bool boot_was_pressed = false;
 };
@@ -33,6 +36,14 @@ Control control;
 
 bool set_screen_on(Control &state, bool turn_on, const char *reason)
 {
+    if (turn_on && state.panel_needs_recovery) {
+        esp_err_t restored = esp_lcd_panel_disp_sleep(state.panel, false);
+        if (restored == ESP_OK) restored = bsp_display_brightness_set(state.saved_brightness);
+        if (restored != ESP_OK) {
+            ESP_LOGE(TAG, "Panel standby recovery failed: %s", esp_err_to_name(restored));
+            return false;
+        }
+    }
     // This runs inside the adapter's LVGL lock, serialized with panel flushes.
     // DISPON/DISPOFF retains brightness and panel RAM; no deep sleep or reset.
     const esp_err_t result = esp_lcd_panel_disp_on_off(state.panel, turn_on);
@@ -41,6 +52,7 @@ bool set_screen_on(Control &state, bool turn_on, const char *reason)
                  esp_err_to_name(result));
         return false;
     }
+    if (turn_on) state.panel_needs_recovery = false;
 
     lv_indev_reset(state.touch, nullptr);
     if (turn_on) {
@@ -65,6 +77,9 @@ bool set_screen_on(Control &state, bool turn_on, const char *reason)
         lv_timer_pause(refresh);
     }
     state.screen_off = !turn_on;
+    if (!turn_on) {
+        state.off_since_ms = lv_tick_get();
+    }
     ESP_LOGI(TAG, "%s: screen %s; heap internal=%zu largest=%zu psram=%zu",
              reason, turn_on ? "on" : "off",
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -103,6 +118,45 @@ void poll_power_button(lv_timer_t *timer)
 }
 
 } // namespace
+
+bool is_off()
+{
+    return control.timer != nullptr && control.screen_off;
+}
+
+uint32_t off_duration_ms()
+{
+    return is_off() ? lv_tick_get() - control.off_since_ms : 0;
+}
+
+esp_err_t sleep_panel_for_standby()
+{
+    if (!is_off() || control.panel_needs_recovery) return ESP_ERR_INVALID_STATE;
+    control.saved_brightness = bsp_display_brightness_get();
+    // The driver may accept SLPIN before a subsequent deep-standby command
+    // fails. Always require recovery after any attempted panel sleep.
+    control.panel_needs_recovery = true;
+    return esp_lcd_panel_disp_sleep(control.panel, true);
+}
+
+bool needs_standby_recovery()
+{
+    return control.panel_needs_recovery;
+}
+
+bool wake_from_standby()
+{
+    if (control.timer == nullptr) {
+        return false;
+    }
+    // GPIO wake occurs on the press edge. Consume that entire press, including
+    // its release, so the ordinary short-press handler cannot blank it again.
+    control.button = ShortPressButton{};
+    control.power_was_pressed = gpio_get_level(BSP_BUTTON_PWR_GPIO) != 0;
+    control.boot_was_pressed = gpio_get_level(BSP_BUTTON_BOOT_GPIO) == 0;
+    control.button.update(control.power_was_pressed, lv_tick_get());
+    return !control.screen_off || set_screen_on(control, true, "Standby wake");
+}
 
 esp_err_t start(esp_lcd_panel_handle_t panel, lv_indev_t *touch,
                 esp_brookesia::systems::phone::Phone *phone)
